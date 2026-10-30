@@ -82,13 +82,17 @@ try {
   const pendantPackagePath = require.resolve('cncjs-pendant-whb04b-6/package.json');
   const pendantPackage = JSON.parse(readFileSync(pendantPackagePath, 'utf8'));
   const config = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     cncjsVersion: JSON.parse(readFileSync(path.join(root, 'node_modules/cncjs/package.json'), 'utf8')).version,
     el400: { revision: sources.el400.revision, mountPath: path.join(sources.el400.directory, 'dist') },
     pendant: { version: pendantPackage.version, mountPath: path.join(path.dirname(pendantPackagePath), 'web') },
   };
   for (const filename of [path.join(config.el400.mountPath, 'index.html'),
     path.join(config.pendant.mountPath, 'widget/index.html'),
+    path.join(config.pendant.mountPath, 'widget/cncjs-session.js'),
+    path.join(config.pendant.mountPath, 'widget/grbl.js'),
+    path.join(config.pendant.mountPath, 'widget/pendant-controls.js'),
+    path.join(config.pendant.mountPath, 'widget/pendant-display.js'),
     path.join(config.pendant.mountPath, 'whb04b-webhid.js')]) {
     if (!existsSync(filename)) throw new Error(`Setup output missing: ${filename}`);
   }

@@ -225,14 +225,19 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x02, 10, 0, 0, 0]);
   await toggleLcdCoordinates();
   await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x82, 5, 0, 0, 0]);
-  await page.frame({ name: 'pendant' }).evaluate(() => {
-    window.testLcdReports = [];
-    for (const type of ['disconnect', 'connect']) {
-      const event = new Event(type);
-      Object.defineProperty(event, 'device', { value: window.testHidDevice });
-      window.testHid.dispatchEvent(event);
-    }
-  });
+  const hidEvent = type => page.frame({ name: 'pendant' }).evaluate(type => {
+    const event = new Event(type);
+    Object.defineProperty(event, 'device', { value: window.testHidDevice });
+    window.testHid.dispatchEvent(event);
+  }, type);
+  await hidEvent('disconnect');
+  await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✗');
+  await page.frame({ name: 'pendant' }).evaluate(() => { window.testLcdReports = []; });
+  await toggleLcdCoordinates();
+  await toggleLcdCoordinates();
+  assert.equal(await lcdFrame(), null, 'Disconnected receiver must not receive LCD updates');
+  await hidEvent('connect');
+  await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✓');
   await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x82, 5, 0, 0, 0]);
   assert.deepEqual(browserErrors, [], 'Mounted widgets must boot without browser errors');
   const widgetJogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
@@ -468,6 +473,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const beforeUnsupportedPosition = getPosition();
   await report({ leftDialCode: 0x14, rightDialCode: 0x0d, jog: 5 });
   await expect(pendantFrame.locator('#log')).toContainText('GRBL supports XYZ; A/B/C wheel input ignored.');
+  await expect.poll(lcdFrame).toEqual([0xfe, 0xfd, 0xfe, 0x40, ...Array(17).fill(0)]);
   for (let confirmation = 0; confirmation < 2; confirmation++) {
     const status = event(socket, 'serialport:read', line => line.startsWith('<'));
     pendant.command('statusreport');
@@ -498,5 +504,10 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect.poll(() => latestState.status.activeState).toBe('Idle');
   await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
   assert.deepEqual(browserErrors, [], 'LinuxCNC-style pendant controls must run without browser errors');
+  const portClosed = event(socket, 'serialport:close');
+  socket.emit('close', 'SIMULATOR');
+  await portClosed;
+  await expect(pendantFrame.locator('#sockPill')).not.toHaveText('joined');
+  await expect.poll(lcdFrame).toEqual([0xfe, 0xfd, 0xfe, 0x40, ...Array(17).fill(0)]);
   socket.disconnect();
 });

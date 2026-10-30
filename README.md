@@ -198,11 +198,14 @@ browser permissions, which this launcher does not configure.
 - **Port already in use:** stop the other server or supply `--port`.
 
 Runtime files live under `.runtime/`: `install.json` records widget paths and
-the pendant npm version and EL400 revision; `cncjs-simulator.json` and `cncjs-machine.json` hold separate server
+the pendant npm version and EL400 revision. `cncjs-simulator.json` and
+`cncjs-machine.json` hold separate server
 settings. These files can contain credentials and are excluded from Git.
 To rebuild from scratch, stop the server, save any wanted runtime settings, remove
 `.runtime` and `node_modules` from this checkout, and rerun setup. Browser widget
-layouts and EL400 preferences live in browser storage and are separate.
+layouts and EL400 preferences live in browser storage and are separate. An old
+`.runtime/pendant` checkout is no longer used after setup; you may remove it once
+any local changes are saved.
 
 CNCjs 1.11.5 brings legacy dependencies with npm audit findings. This integration
 pins that dependency tree and listens locally. Review upstream updates before
