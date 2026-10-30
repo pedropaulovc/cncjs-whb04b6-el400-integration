@@ -86,9 +86,9 @@ exposes only `SIMULATOR` and rejects attempts to open physical serial ports.
 It uses CNCjs's actual serial transport interface and GRBL parser with an in-process
 mock binding, so no virtual COM driver, `socat`, or administrator access is needed.
 
-The simulator supports XYZ linear moves, timed jogging, status queries, hold/resume,
+The simulator supports XYZ linear moves, standalone `G4 Pseconds` dwells, timed jogging, status queries, hold/resume,
 jog cancel, reset, homing to zero, G20/G21, G90/G91, and G54 work offsets through
-`G10 L20 P1`. It does not model cutting, acceleration, limits, arcs, probing,
+`G10 L20 P1`. It does not model cutting, acceleration, limits, alarms, arcs, probing,
 override effects, or firmware configuration writes. Unsupported G-code returns an
 error. Positions reset on reconnection or restart. Use it to check the controls
 and readout, not to validate a machining program.
@@ -127,9 +127,11 @@ headless sessions need permissions appropriate to their login setup.
 Start with a small jog and confirm axis direction, step size, work zero, and stop
 behavior with the spindle off and the tool clear. The pendant's software Reset
 and Stop do not replace a wired emergency stop. Stop cancels jogging and clears
-queued CNCjs commands. For a running program, it uses CNCjs's forced stop (hold,
-then controller reset), so Start cannot resume the canceled program. Follow the
-controller's unlock/homing procedure after a reset. Its upstream Safe-Z and W-Home
+queued CNCjs commands. For a running program, it requests hold and waits for GRBL
+to report that motion has stopped before resetting the controller. Pendant motion
+commands stay blocked until the stop is confirmed. Stop at Idle or during jogging
+does not switch off the spindle. Follow the controller's unlock/homing procedure
+after a reset. Its upstream Safe-Z and W-Home
 macros assume machine Z **-5 mm**; Probe-Z assumes a **50 mm** downward search and
 defaults to a **20 mm** plate. Check those settings against the machine before
 using those buttons. The supported manual workflow here is three-axis GRBL;

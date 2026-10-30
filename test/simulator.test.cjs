@@ -46,7 +46,7 @@ test('feed hold pauses programmed motion and cycle start resumes it', () => {
   assert.equal(sim.state, 'Run');
 });
 
-for (const byte of [0x21, 0x85]) test(`realtime byte ${byte} cancels jogging and discards queued jogs`, () => {
+for (const byte of [0x21, 0x85]) test(`realtime byte 0x${byte.toString(16)} cancels jogging and discards queued jogs`, () => {
   const { sim, command } = machine();
   command('$J=G91 X10 F60');
   command('$J=G91 X10 F60');
@@ -63,6 +63,83 @@ test('feed hold at Idle enters Hold and cycle start clears it', () => {
   assert.equal(sim.state, 'Hold:0');
   sim.input('~');
   assert.equal(sim.state, 'Idle');
+});
+
+test('normal G-code queues while held and resumes in order', () => {
+  const { sim, command, lines } = machine();
+  command('G91 G1 X2 F60'); sim.tick(1);
+  sim.input('!');
+  command('G1 X3');
+  assert.equal(lines.at(-1), 'ok');
+  sim.tick(20);
+  assert.equal(sim.position[0], 1);
+  assert.equal(sim.state, 'Hold:0');
+  sim.input('~'); sim.tick(4);
+  assert.equal(sim.position[0], 5);
+  assert.equal(sim.state, 'Idle');
+});
+
+test('a move accepted during idle hold waits for cycle start', () => {
+  const { sim, command, lines } = machine();
+  sim.input('!'); command('G91 G1 X1 F60');
+  assert.equal(lines.at(-1), 'ok');
+  assert.equal(sim.state, 'Hold:0');
+  sim.tick(10);
+  assert.equal(sim.position[0], 0);
+  sim.input('~'); sim.tick(1);
+  assert.equal(sim.position[0], 1);
+});
+
+test('jogs outside Idle and Jog return error:8 without changing the held program', () => {
+  const { sim, command, lines } = machine();
+  command('G91 G1 X2 F60');
+  command('$J=G91 X10 F60');
+  assert.equal(lines.at(-1), 'error:8');
+  sim.input('!'); command('$J=G91 X10 F60');
+  assert.equal(lines.at(-1), 'error:8');
+  sim.input('~'); sim.tick(2);
+  assert.equal(sim.position[0], 2);
+});
+
+test('standalone G4 delays its ACK until preceding motion and the dwell complete', () => {
+  const { sim, command, lines } = machine();
+  command('G91 G1 X1 F60'); command('G4 P0.5');
+  assert.equal(lines.filter(line => line === 'ok').length, 1);
+  sim.tick(1.25);
+  assert.equal(sim.position[0], 1);
+  assert.equal(lines.filter(line => line === 'ok').length, 1);
+  sim.tick(0.25);
+  assert.equal(lines.filter(line => line === 'ok').length, 2);
+  assert.equal(sim.state, 'Idle');
+});
+
+test('dwell preserves response order and realtime hold/reset remain available', () => {
+  const { sim, command, lines } = machine();
+  command('G4 P1'); command('$I');
+  assert.equal(lines.some(line => line.startsWith('[VER:')), false);
+  sim.tick(0.5); sim.input('!'); sim.tick(5);
+  assert.equal(lines.includes('ok'), false);
+  sim.input('~'); sim.tick(0.5);
+  assert.equal(lines.at(-4), 'ok');
+  assert.match(lines.at(-3), /^\[VER:/);
+  assert.match(lines.at(-2), /^\[OPT:/);
+  assert.equal(lines.at(-1), 'ok');
+  command('G4 P10'); command('G1 X100');
+  sim.input(Buffer.from([0x18])); sim.tick(20);
+  assert.equal(sim.position[0], 0);
+  assert.equal(sim.commandState, 'ready');
+  assert.deepEqual(sim.pendingCommands, []);
+});
+
+test('unsupported dwell combinations and invalid durations fail without motion', () => {
+  const { sim, command, lines } = machine();
+  for (const line of ['G4', 'G4 P-1', 'G4 P1 X1', 'G4 G1 P1', '$J=G4 P1 F60']) {
+    command(line);
+    assert.match(lines.at(-1), /^error:/);
+    assert.equal(sim.motion, null);
+  }
+  command('G4 P0'); sim.tick(0);
+  assert.equal(lines.at(-1), 'ok');
 });
 
 test('soft reset cancels motion and restores modes without teleporting position', () => {

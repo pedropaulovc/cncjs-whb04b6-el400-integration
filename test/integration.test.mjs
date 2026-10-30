@@ -59,6 +59,8 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   assert.ok(token);
   const socket = io(base, { query: { token }, transports: ['websocket'], reconnection: false });
   const serialTrace = [];
+  let workflowState;
+  socket.on('workflow:state', state => { workflowState = state; });
   const trace = entry => { serialTrace.push(entry); if (serialTrace.length > 50) serialTrace.shift(); };
   socket.on('controller:state', (_, state) => trace(state.status?.activeState));
   socket.on('serialport:read', trace);
@@ -99,6 +101,14 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const browser = await chromium.launch({ channel: process.env.PW_CHANNEL || undefined, headless: process.env.PW_DISPLAY !== 'headed' });
   t.after(() => browser.close());
   const page = await browser.newPage();
+  await page.addInitScript(() => {
+    // Capture the real driver's EventTarget to inject pendant input without USB.
+    const add = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function (type, ...args) {
+      if (type === 'use') window.testPendant = this;
+      return add.call(this, type, ...args);
+    };
+  });
   const browserErrors = [];
   page.on('pageerror', error => browserErrors.push(error.message));
   await page.route(`${base}/integration-test`, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Widget integration test</title><body></body>' }));
@@ -128,6 +138,16 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await movedAgain;
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
   assert.deepEqual(browserErrors, [], 'Mounted widgets must boot without browser errors');
+  const widgetJogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
+  new Grbl(pendant).jog('X', 10000, 0x0d);
+  await widgetJogging;
+  const widgetStopped = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Idle');
+  await page.frame({ name: 'pendant' }).evaluate(() => {
+    window.testPendant.dispatchEvent(new CustomEvent('use', { detail: { firstKeyCode: 0x02, jog: 0 } }));
+  });
+  await widgetStopped;
+  await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
+  assert.deepEqual(browserErrors, [], 'The actual widget Stop handler must work');
   const jogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
   const controls = new Grbl(pendant);
   controls.jog('X', 10000, 0x0d);
@@ -136,20 +156,33 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   controls.stop();
   const [, stoppedState] = await stopped;
   assert.ok(Number(stoppedState.status.mpos.x) < 20, 'Stop must cancel before the jog target');
+  await expect.poll(() => pendant.stopPhase).toBe('idle');
   const idleAfterStop = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
   controls.stop();
   assert.match((await idleAfterStop)[0], /^<Idle\|/, 'Stop at Idle must not put GRBL into Hold');
+  await expect.poll(() => pendant.stopPhase).toBe('idle');
   t.diagnostic('Stop at Idle and Jog verified');
   const running = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Run');
-  socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G91 G1 X10 F50');
+  const loaded = event(socket, 'gcode:load');
+  socket.emit('command', 'SIMULATOR', 'gcode:load', 'stop-regression.nc', 'G21 G91\nG1 X10 F50\nG1 X10 F50');
+  await loaded;
+  const workflowStarted = event(socket, 'workflow:state', state => state === 'running');
+  socket.emit('command', 'SIMULATOR', 'gcode:start');
+  await workflowStarted;
   await running;
   const reset = event(socket, 'serialport:read', line => line.startsWith('Grbl'), 3000);
   const cancelled = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Idle', 3000);
+  const workflowStopped = event(socket, 'workflow:state', state => state === 'idle', 3000);
   controls.stop();
-  await Promise.all([reset, cancelled]).catch(error => { throw new Error(`${error.message}; recent GRBL replies: ${JSON.stringify(serialTrace)}; server: ${output}`); });
-  const afterStart = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
+  await Promise.all([reset, cancelled, workflowStopped]).catch(error => { throw new Error(`${error.message}; recent GRBL replies: ${JSON.stringify(serialTrace)}; server: ${output}`); });
+  await expect.poll(() => pendant.stopPhase).toBe('idle');
   controls.cyclestart();
-  pendant.command('statusreport');
-  assert.match((await afterStart)[0], /^<Idle\|/, 'Start must not resume the canceled program');
+  // Confirm twice to exclude one status reply already in flight before Start.
+  for (let report = 0; report < 2; report++) {
+    const afterStart = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
+    pendant.command('statusreport');
+    assert.match((await afterStart)[0], /^<Idle\|/, 'Start must not resume the canceled program');
+    assert.equal(workflowState, 'idle', 'Start must not restart the stopped sender');
+  }
   socket.disconnect();
 });

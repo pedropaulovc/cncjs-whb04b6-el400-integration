@@ -14,6 +14,8 @@ class GrblSimulator {
   reset() {
     this.motion = null;
     this.queue = [];
+    this.pendingCommands = [];
+    this.commandState = 'ready';
     this.state = 'Idle';
     this.units = 'G21';
     this.distance = 'G90';
@@ -48,6 +50,7 @@ class GrblSimulator {
     // GRBL protocol.c: a hold cancels jogging, but Idle enters Hold:0.
     // https://github.com/gnea/grbl/blob/bfb67f0c7963fe3ce4aaf8a97f9009ea5a8db36e/grbl/protocol.c#L257-L288
     if (byte === 0x21) {
+      if (['Alarm', 'Check', 'Door', 'Sleep'].includes(this.state.split(':')[0])) return;
       if (this.motion?.kind === 'Jog') return this.cancelJog();
       this.state = 'Hold:0';
       return;
@@ -68,6 +71,7 @@ class GrblSimulator {
   }
 
   command(raw) {
+    if (this.commandState === 'dwelling') { this.pendingCommands.push(raw); return; }
     const line = raw.replace(/\([^)]*\)/g, '').replace(/;.*$/, '').replace(/\s/g, '').toUpperCase();
     const ok = () => this.send('ok');
     const error = code => this.send(`error:${code}`);
@@ -90,13 +94,15 @@ class GrblSimulator {
     }
     const kind = line.startsWith('$J=') ? 'Jog' : 'Run';
     if (line.startsWith('$') && kind !== 'Jog') return error(3);
-    if (this.state.startsWith('Hold') || this.state === 'Alarm') return error(9);
+    // protocol.c allows normal G-code while held; system.c restricts $J to Idle/Jog.
+    if (kind === 'Jog' && !['Idle', 'Jog'].includes(this.state)) return error(8);
+    if (kind === 'Run' && ['Alarm', 'Jog'].includes(this.state)) return error(9);
     if (this.queue.length >= 15) return error(11);
     const source = kind === 'Jog' ? line.slice(3) : line;
     const words = [...source.matchAll(/([A-Z])([-+]?(?:\d+(?:\.\d*)?|\.\d+))/g)];
     if (words.map(m => m[0]).join('') !== source) return error(2);
     const codes = words.filter(m => 'GM'.includes(m[1])).map(m => m[1] + Number(m[2]));
-    if (codes.some(c => !['G0', 'G1', 'G10', 'G17', 'G20', 'G21', 'G40', 'G49', 'G53', 'G54', 'G80', 'G90', 'G91', 'G94', 'M3', 'M4', 'M5', 'M8', 'M9'].includes(c))) return error(20);
+    if (codes.some(c => !['G0', 'G1', 'G4', 'G10', 'G17', 'G20', 'G21', 'G40', 'G49', 'G53', 'G54', 'G80', 'G90', 'G91', 'G94', 'M3', 'M4', 'M5', 'M8', 'M9'].includes(c))) return error(20);
     if (words.some(m => !'GMXYZFSLPN'.includes(m[1]))) return error(20);
     if (kind === 'Jog' && codes.some(c => !['G20', 'G21', 'G90', 'G91', 'G53'].includes(c))) return error(20);
     const letters = words.filter(m => !'GM'.includes(m[1])).map(m => m[1]);
@@ -105,6 +111,18 @@ class GrblSimulator {
       if (codes.filter(c => group.includes(c)).length > 1) return error(21);
     }
     const values = Object.fromEntries(words.map(m => [m[1], Number(m[2])]));
+    const previous = this.queue.at(-1)?.target || this.motion?.target || this.position;
+    if (codes.includes('G4')) {
+      // Limited standalone dwell, including CNCjs's trailing G4P0.5 barrier.
+      // GRBL mc_dwell synchronizes the planner and completes before its line ACK.
+      if (codes.length !== 1 || words.some(m => !'GP'.includes(m[1]))) return error(20);
+      if (values.P === undefined) return error(28);
+      if (!Number.isFinite(values.P) || values.P < 0) return error(4);
+      this.queue.push({ target: previous, dwellSeconds: values.P, kind: 'Run' });
+      this.commandState = 'dwelling';
+      this.next();
+      return;
+    }
     const units = codes.find(c => c === 'G20' || c === 'G21') || this.units;
     const distance = codes.find(c => c === 'G90' || c === 'G91') || this.distance;
     const scale = units === 'G20' ? 25.4 : 1;
@@ -128,7 +146,6 @@ class GrblSimulator {
     }
     if (codes.includes('G10')) return ok();
     if (!axes.some(axis => values[axis] !== undefined)) return ok();
-    const previous = this.queue.at(-1)?.target || this.motion?.target || this.position;
     const target = axes.map((axis, i) => {
       if (values[axis] === undefined) return previous[i];
       if (distance === 'G91') return previous[i] + values[axis] * scale;
@@ -143,19 +160,35 @@ class GrblSimulator {
   next() {
     if (this.motion || !this.queue.length) return;
     this.motion = this.queue.shift();
-    this.state = this.motion.kind;
+    if (!this.state.startsWith('Hold')) this.state = this.motion.kind;
   }
 
   tick(seconds) {
-    if (!this.motion || this.state.startsWith('Hold')) return;
-    const delta = this.motion.target.map((n, i) => n - this.position[i]);
-    const length = Math.hypot(...delta);
-    const step = this.motion.feed / 60 * seconds;
-    if (step < length) { this.position = this.position.map((n, i) => n + delta[i] * step / length); return; }
-    this.position = this.motion.target;
-    this.motion = null;
-    this.state = 'Idle';
-    this.next();
+    while (this.motion && !this.state.startsWith('Hold')) {
+      if (this.motion.dwellSeconds !== undefined) {
+        if (seconds < this.motion.dwellSeconds) { this.motion.dwellSeconds -= seconds; return; }
+        seconds -= this.motion.dwellSeconds;
+        this.motion = null;
+        this.state = 'Idle';
+        this.commandState = 'ready';
+        this.send('ok');
+        while (this.pendingCommands.length && this.commandState === 'ready') this.command(this.pendingCommands.shift());
+        this.next();
+        continue;
+      }
+      const delta = this.motion.target.map((n, i) => n - this.position[i]);
+      const length = Math.hypot(...delta);
+      const duration = length / (this.motion.feed / 60);
+      if (seconds < duration) {
+        this.position = this.position.map((n, i) => n + delta[i] * seconds / duration);
+        return;
+      }
+      seconds -= duration;
+      this.position = this.motion.target;
+      this.motion = null;
+      this.state = 'Idle';
+      this.next();
+    }
   }
 }
 
