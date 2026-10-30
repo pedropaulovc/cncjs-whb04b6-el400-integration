@@ -146,6 +146,24 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   t.after(() => browser.close());
   const page = await browser.newPage();
   await page.addInitScript(() => {
+    // Exercise the real LCD encoder and transport against a USB test double.
+    const device = new EventTarget();
+    Object.assign(device, {
+      vendorId: 0x10ce, productId: 0xeb93, opened: false,
+      async open() { this.opened = true; },
+      async close() { this.opened = false; },
+      async sendFeatureReport(reportId, bytes) {
+        window.testLcdReports.push({ reportId, bytes: Array.from(bytes) });
+        if (window.testLcdReports.length > 300) window.testLcdReports.splice(0, 3);
+      },
+    });
+    window.testLcdReports = [];
+    const hid = new EventTarget();
+    hid.getDevices = async () => [device];
+    hid.requestDevice = async () => [device];
+    window.testHid = hid;
+    window.testHidDevice = device;
+    Object.defineProperty(navigator, 'hid', { configurable: true, value: hid });
     // Capture the real driver's EventTarget to inject pendant input without USB.
     const add = EventTarget.prototype.addEventListener;
     EventTarget.prototype.addEventListener = function (type, ...args) {
@@ -171,6 +189,16 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const pendantFrame = page.frameLocator('iframe[name="pendant"]');
   await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
   await expect(pendantFrame.locator('#portPill')).toHaveText('port SIMULATOR');
+  await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✓');
+  const lcdFrame = async () => page.frame({ name: 'pendant' }).evaluate(() => {
+    const reports = window.testLcdReports;
+    const count = reports.length - reports.length % 3;
+    if (count < 3) return null;
+    const chunks = reports.slice(count - 3, count);
+    if (chunks.some(chunk => chunk.reportId !== 6 || chunk.bytes.length !== 7)) throw new Error('Invalid LCD feature report framing');
+    return chunks.flatMap(chunk => chunk.bytes);
+  });
+  await expect.poll(async () => (await lcdFrame())?.slice(0, 3)).toEqual([0xfe, 0xfd, 0xfe]);
   const droFrame = page.frameLocator('iframe[name="dro"]');
   // Wait past the startup splash and verify the actual machine coordinate.
   // A fresh EL400 defaults to inches: 5 mm = 0.1969 in at four decimals.
@@ -181,6 +209,31 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await movedAgain;
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  // LinuxCNC's packed LCD report: FE FD FE, relative+MPG flags, integer/fraction
+  // coordinate pairs, then 16-bit feed/spindle override percentages.
+  await expect.poll(lcdFrame).toEqual([
+    0xfe, 0xfd, 0xfe, 0x82,
+    5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    100, 0, 100, 0, 0,
+  ]);
+  const toggleLcdCoordinates = () => page.frame({ name: 'pendant' }).evaluate(() => {
+    for (const key of [0x10, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
+      detail: { firstKeyCode: key, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
+    }));
+  });
+  await toggleLcdCoordinates();
+  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x02, 10, 0, 0, 0]);
+  await toggleLcdCoordinates();
+  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x82, 5, 0, 0, 0]);
+  await page.frame({ name: 'pendant' }).evaluate(() => {
+    window.testLcdReports = [];
+    for (const type of ['disconnect', 'connect']) {
+      const event = new Event(type);
+      Object.defineProperty(event, 'device', { value: window.testHidDevice });
+      window.testHid.dispatchEvent(event);
+    }
+  });
+  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x82, 5, 0, 0, 0]);
   assert.deepEqual(browserErrors, [], 'Mounted widgets must boot without browser errors');
   const widgetJogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
   assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 10, 50), 'sent');
@@ -367,6 +420,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await press(0x07, 0, 0x1b);
   await expect.poll(() => latestState.status.ov?.[2]).toBe(102);
   await expect.poll(() => Number(latestState.status.spindle)).toBe(510);
+  await expect.poll(async () => (await lcdFrame())?.slice(16, 20)).toEqual([99, 0, 102, 0]);
   await press(0x0b, 0, 0x1b);
   await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M5');
   await press(0x06, 0x0c, 0x1b); // Fn + Spindle+: programmed RPM.
@@ -386,6 +440,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect.poll(() => latestState.parserstate?.modal?.coolant).toBe('M9');
 
   await press(0x0f, 0, 0x0e); // Step, 0.01 mm per detent.
+  await expect.poll(async () => (await lcdFrame())?.[3]).toBe(0x81);
   await report({ rightDialCode: 0x0e, jog: 4 });
   await expect.poll(() => Number(latestState.status.mpos.x)).toBeCloseTo(stationary[0] + 0.04, 3);
   await expect.poll(() => latestState.status.activeState).toBe('Idle');
