@@ -220,7 +220,11 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   // Observing G20 establishes that GRBL processed commands after the dwell.
   const mdiDrained = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
   pendant.command('gcode', 'G20');
-  const [, mdiState] = await mdiDrained;
-  assert.equal(mdiState.status.activeState, 'Idle', 'The queued MDI move must not run after Stop');
+  await mdiDrained;
+  for (let report = 0; report < 2; report++) {
+    const mdiStatus = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
+    pendant.command('statusreport');
+    assert.match((await mdiStatus)[0], /^<Idle\|/, 'The queued MDI move must not run after Stop');
+  }
   socket.disconnect();
 });
