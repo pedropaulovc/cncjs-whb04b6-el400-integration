@@ -104,13 +104,18 @@ Press **Step** or **Continuous** before using the wheel to move an axis.
 | MPG | Adjust feed override |
 | Lead | Adjust spindle override; never jog |
 | Step | Move the selected distance per detent; finish the requested move after the wheel stops |
-| Continuous | Jog at the selected percentage of the axis maximum rate; cancel when wheel reports stop |
+| Continuous | Jog at the selected percentage of the axis maximum rate; cancel after 180 ms without wheel movement |
 
 Leaving Lead returns to MPG. Step sizes are **0.001, 0.01, 0.1, 1, 5, and 10 mm**;
 the 5/10 mm settings require explicit enablement in the pendant widget. These
 replace the previous 10/50 mm mappings. The widget also configures step feed,
 spindle speed increments, and custom macros. Settings are local to the browser
 and CNCjs address.
+
+Turning the rate selector in MPG or Continuous also sets the program feed
+override to that percentage. GRBL's minimum override is 10%, so its 2% and 5%
+positions use 10% for program feed override; Continuous jog speed still uses
+the printed percentage. The first input report does not change the override.
 
 Feed +/- and Spindle +/- adjust overrides. **Fn + Spindle +/-** changes the
 programmed RPM; **Fn + S on/off** selects the next spindle direction while
