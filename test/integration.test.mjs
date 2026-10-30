@@ -140,7 +140,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const rejected = await new Promise(resolve => socket.emit('open', 'COM1', { controllerType: 'Grbl', baudrate: 115200 }, resolve));
   assert.ok(rejected, 'Simulation must reject hardware even when directly requested');
 
-  const browser = await chromium.launch({ channel: process.env.PW_CHANNEL || undefined, headless: process.env.PW_DISPLAY !== 'headed' });
+  const browser = await chromium.launch({ channel: process.env.PW_CHANNEL || undefined, headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage();
   await page.addInitScript(() => {

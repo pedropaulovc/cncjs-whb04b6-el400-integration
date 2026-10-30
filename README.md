@@ -221,8 +221,8 @@ Unit tests exercise the GRBL protocol and simulated serial isolation. The
 integration test starts the real CNCjs server, checks widget assets, opens the
 simulator, exercises the pendant's session after G20, and checks machine/work
 coordinates through Socket.IO. It also boots both widgets in Chromium and checks
-the EL400 display after a jog. To run headed Edge locally, set `PW_CHANNEL=msedge`
-and `PW_DISPLAY=headed` in the environment before running the test.
+the EL400 display after a jog. Browser tests run headlessly. Set `PW_CHANNEL=msedge`
+to use Edge locally instead of Playwright's bundled Chromium.
 CI runs setup and these tests on Windows and Linux. Hardware WebHID permission
 and physical motion still require the operator checks above.
 
