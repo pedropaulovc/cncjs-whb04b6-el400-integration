@@ -303,6 +303,26 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect.poll(() => queuedJog.jogPhase).toBe('idle');
   assert.equal(writes.slice(completedWrites).filter(line => line.startsWith('$J=')).length, 2,
     'An acknowledged out-and-back pair must finish without leaving the pendant locked');
+  // A widget joining an open controller cannot correlate pre-join replies.
+  // Keep its cancellation armed without polling forever or deleting later MDI work.
+  const lateSession = new CncjsSession({ io, origin: base });
+  t.after(() => lateSession.disconnect());
+  lateSession.connect(token);
+  await expect.poll(() => lateSession.status.phase).toBe('joined');
+  const uncertainJog = new Grbl(lateSession, undefined, message => t.diagnostic(message));
+  t.after(() => uncertainJog.clearJog());
+  assert.equal(uncertainJog.jog('X', 0.001, 250), 'sent');
+  await expect.poll(() => uncertainJog.jogReceipt?.state).toBe('uncertain');
+  await expect.poll(() => uncertainJog.jogTimer).toBe(null);
+  assert.equal(uncertainJog.jogCompleted(), false, 'Unknown history must not manufacture completion');
+  const laterDwell = event(socket, 'serialport:write', line => line.includes('G4 P1'));
+  pendant.command('gcode', ['G4 P1', 'G20']);
+  await laterDwell;
+  const laterMacro = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
+  uncertainJog.cancelJog();
+  await laterMacro;
+  await expect.poll(() => uncertainJog.jogPhase).toBe('idle');
+  lateSession.disconnect();
   // Exercise the mounted widget, real CNCjs directives, and GRBL parser together.
   // Input reports replace USB only; command routing and machine replies are real.
   const report = async detail => {
