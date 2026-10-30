@@ -132,5 +132,16 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   controls.stop();
   const [, stoppedState] = await stopped;
   assert.ok(Number(stoppedState.status.mpos.x) < 20, 'Stop must cancel before the jog target');
+  const running = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Run');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G91 G1 X10 F50');
+  await running;
+  const held = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Hold', 2000);
+  controls.stop();
+  const [, heldState] = await held;
+  const heldX = Number(heldState.status.mpos.x);
+  const nextHeld = event(socket, 'serialport:read', line => line.startsWith('<Hold'), 2000);
+  socket.emit('command', 'SIMULATOR', 'statusreport');
+  const [nextHeldLine] = await nextHeld;
+  assert.equal(Number(nextHeldLine.match(/MPos:([^,]+)/)[1]), heldX, 'Programmed motion must remain held');
   socket.disconnect();
 });
