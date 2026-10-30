@@ -8,6 +8,7 @@ import { createServer } from 'node:net';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
+import { chromium, expect } from '@playwright/test';
 
 // Use the client shipped with the pinned CNCjs server so protocol versions agree.
 const require = createRequire(import.meta.url);
@@ -90,5 +91,38 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await zeroed;
   const rejected = await new Promise(resolve => socket.emit('open', 'COM1', { controllerType: 'Grbl', baudrate: 115200 }, resolve));
   assert.ok(rejected, 'Simulation must reject hardware even when directly requested');
+
+  const browser = await chromium.launch({ channel: process.env.PW_CHANNEL || undefined, headless: process.env.PW_DISPLAY !== 'headed' });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  const browserErrors = [];
+  page.on('pageerror', error => browserErrors.push(error.message));
+  await page.route(`${base}/integration-test`, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Widget integration test</title><body></body>' }));
+  await page.goto(`${base}/integration-test`);
+  // Embed the real built widgets using CNCjs's same-origin/token contract.
+  await page.evaluate(({ token }) => {
+    document.body.replaceChildren();
+    for (const [name, route] of [['pendant', '/whb04b/widget/index.html?'], ['dro', '/el400/?source=cncjs&']]) {
+      const frame = document.createElement('iframe');
+      frame.name = name;
+      frame.style.cssText = 'display:block;width:1100px;height:800px;border:0';
+      frame.src = `${route}token=${encodeURIComponent(token)}`;
+      document.body.append(frame);
+    }
+  }, { token });
+  const pendantFrame = page.frameLocator('iframe[name="pendant"]');
+  await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
+  await expect(pendantFrame.locator('#portPill')).toHaveText('port SIMULATOR');
+  const droFrame = page.frameLocator('iframe[name="dro"]');
+  // Wait past the startup splash and verify the actual machine coordinate.
+  // A fresh EL400 defaults to inches: 5 mm = 0.1969 in at four decimals.
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.1969', { timeout: 10000 });
+  await droFrame.getByRole('button', { name: /toggle units/i }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
+  const movedAgain = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 10 && state.status.activeState === 'Idle');
+  new Grbl(pendant).jog('X', 5, 0x10);
+  await movedAgain;
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  assert.deepEqual(browserErrors, [], 'Mounted widgets must boot without browser errors');
   socket.disconnect();
 });
