@@ -216,6 +216,15 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     100, 0, 100, 0, 0,
   ]);
+  const displayInches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
+  await displayInches;
+  // GRBL still reports millimetres ($13=0); the LCD must show 5/25.4 = 0.1969 in.
+  await expect.poll(async () => (await lcdFrame())?.slice(4, 8)).toEqual([0, 0, 177, 7]);
+  const displayMillimetres = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
+  await displayMillimetres;
+  await expect.poll(async () => (await lcdFrame())?.slice(4, 8)).toEqual([5, 0, 0, 0]);
   const toggleLcdCoordinates = () => page.frame({ name: 'pendant' }).evaluate(() => {
     for (const key of [0x10, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
       detail: { firstKeyCode: key, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
