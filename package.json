@@ -1,0 +1,24 @@
+{
+  "name": "cncjs-whb04b6-el400-integration",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedropaulovc/cncjs-whb04b6-el400-integration.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/pedropaulovc/cncjs-whb04b6-el400-integration/issues"
+  },
+  "homepage": "https://github.com/pedropaulovc/cncjs-whb04b6-el400-integration#readme",
+  "dependencies": {
+    "@serialport/binding-mock": "10.2.2",
+    "@serialport/stream": "10.5.0",
+    "cncjs": "1.11.5"
+  }
+}
