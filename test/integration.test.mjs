@@ -93,6 +93,17 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   assert.equal(login.status, 200);
   const { token } = await login.json();
   assert.ok(token);
+  const macroApi = async (path = '', method = 'GET', body) => {
+    const response = await fetch(`${base}/api/macros${path}`, {
+      method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  await macroApi('', 'POST', { name: 'Pendant units', content: 'G20' });
+  const savedMacro = (await macroApi()).records.find(record => record.name === 'Pendant units');
+  assert.ok(savedMacro?.id);
   const socket = io(base, { query: { token }, transports: ['websocket'], reconnection: false });
   const serialTrace = [];
   let workflowState;
@@ -225,6 +236,63 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
   await displayMillimetres;
   await expect.poll(async () => (await lcdFrame())?.slice(4, 8)).toEqual([5, 0, 0, 0]);
+  await pendantFrame.getByText('Pendant settings', { exact: true }).click();
+  await pendantFrame.getByText('Macro buttons', { exact: true }).click();
+  const assignment = pendantFrame.getByRole('combobox', { name: 'Assignment for Fn + Feed+' });
+  await expect(assignment.locator('option', { hasText: 'Pendant units' })).toHaveCount(1);
+  await assignment.selectOption(`cncjs:${savedMacro.id}`);
+  await pendantFrame.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(pendantFrame.locator('#settingsStatus')).toContainText('Settings saved');
+  const macroButton = (key, modifier = 0) => page.frame({ name: 'pendant' }).evaluate(({ key, modifier }) => {
+    for (const pressed of [key, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
+      detail: { firstKeyCode: pressed ? modifier || key : 0, secondKeyCode: pressed && modifier ? key : 0,
+        leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
+    }));
+  }, { key, modifier });
+  await macroButton(0x04, 0x0c);
+  await expect.poll(() => latestState.parserstate?.modal?.units).toBe('G20');
+  await macroApi(`/${savedMacro.id}`, 'PUT', { name: 'Updated units', content: '%units=21\nG[units]' });
+  await expect(assignment.locator('option', { hasText: 'Updated units' })).toHaveCount(1);
+  await macroButton(0x04, 0x0c);
+  await expect.poll(() => latestState.parserstate?.modal?.units).toBe('G21');
+  const customAssignment = pendantFrame.getByRole('combobox', { name: 'Assignment for Fn + Feed-' });
+  await customAssignment.selectOption('custom');
+  await pendantFrame.getByRole('textbox', { name: 'G-code for Fn + Feed-', exact: true }).fill('G20\nG21');
+  await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
+  await expect(pendantFrame.getByRole('textbox', { name: 'G-code for Fn + Feed-', exact: true })).toHaveValue('G20\nG21');
+  await pendantFrame.getByRole('button', { name: 'Save settings', exact: true }).click();
+  const customWrites = writes.length;
+  await macroButton(0x05, 0x0c);
+  await expect.poll(() => writes.slice(customWrites).some(line => line.trim() === 'G20')).toBe(true);
+  await expect.poll(() => latestState.parserstate?.modal?.units).toBe('G21');
+  // A response arriving after Stop must never turn into delayed macro execution.
+  await macroApi(`/${savedMacro.id}`, 'PUT', { content: 'G20' });
+  let releaseRead;
+  const readGate = new Promise(resolve => { releaseRead = resolve; });
+  const macroUrl = `${base}/api/macros/${savedMacro.id}`;
+  await page.route(macroUrl, async route => { await readGate; await route.continue(); });
+  try {
+    const waitingRead = page.waitForRequest(macroUrl, { timeout: 5000 });
+    await macroButton(0x04, 0x0c);
+    await waitingRead;
+    await macroButton(0x02);
+    releaseRead();
+    await expect(pendantFrame.locator('#log')).toContainText('Saved macro request canceled.');
+    assert.equal(latestState.parserstate?.modal?.units, 'G21');
+  } finally { releaseRead(); await page.unroute(macroUrl); }
+  await macroApi(`/${savedMacro.id}`, 'DELETE');
+  await expect(assignment.locator('option:checked')).toContainText('Unavailable');
+  await macroButton(0x04, 0x0c);
+  await expect(pendantFrame.locator('#log')).toContainText('no longer exists');
+  await page.route(`${base}/api/macros`, route => route.fulfill({ status: 401, body: '{}' }));
+  await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
+  await expect(pendantFrame.locator('#macroStatus')).toContainText('HTTP 401');
+  await expect(assignment).toHaveValue(`cncjs:${savedMacro.id}`);
+  await page.unroute(`${base}/api/macros`);
+  await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
+  await assignment.selectOption('disabled');
+  await customAssignment.selectOption('disabled');
+  await pendantFrame.getByRole('button', { name: 'Save settings', exact: true }).click();
   const toggleLcdCoordinates = () => page.frame({ name: 'pendant' }).evaluate(() => {
     for (const key of [0x10, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
       detail: { firstKeyCode: key, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
