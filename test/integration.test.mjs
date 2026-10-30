@@ -246,7 +246,6 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const getPosition = () => ['x', 'y', 'z'].map(axis => Number(latestState.status.mpos[axis]));
   const stationary = getPosition();
   await pendantFrame.locator('#thickness').fill('');
-  await pendantFrame.locator('#thickness').dispatchEvent('change');
   await press(0x0d);
   await expect(pendantFrame.locator('#log')).toContainText('Enter a valid nonnegative probe plate thickness.');
   assert.deepEqual(getPosition(), stationary, 'A blank probe thickness must not start a probe');
@@ -293,6 +292,11 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await press(0x0f, 0, 0x0e); // Step, 0.01 mm per detent.
   await report({ rightDialCode: 0x0e, jog: 4 });
   await expect.poll(() => Number(latestState.status.mpos.x)).toBeCloseTo(stationary[0] + 0.04, 3);
+  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  // CNCjs's automatic status broadcasts must suffice; the test sends no extra
+  // raw status requests to make the pendant's cancellation guard recover.
+  await report({ leftDialCode: 0x12, rightDialCode: 0x0e, jog: 4 });
+  await expect.poll(() => Number(latestState.status.mpos.y)).toBeCloseTo(stationary[1] + 0.04, 3);
   await expect.poll(() => latestState.status.activeState).toBe('Idle');
   const stepped = getPosition();
   await press(0x0e, 0, 0x0d); // Continuous at 2% of the controller maximum.
