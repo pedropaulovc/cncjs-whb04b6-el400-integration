@@ -89,6 +89,7 @@ try {
   };
   for (const filename of [path.join(config.el400.mountPath, 'index.html'),
     path.join(config.pendant.mountPath, 'widget/index.html'),
+    path.join(config.pendant.mountPath, 'widget/whb04b-widget.js'),
     path.join(config.pendant.mountPath, 'widget/cncjs-session.js'),
     path.join(config.pendant.mountPath, 'widget/grbl.js'),
     path.join(config.pendant.mountPath, 'widget/pendant-controls.js'),

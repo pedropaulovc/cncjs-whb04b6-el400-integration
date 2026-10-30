@@ -244,7 +244,8 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await page.frame({ name: 'pendant' }).evaluate(() => { window.testLcdReports = []; });
   await toggleLcdCoordinates();
   await toggleLcdCoordinates();
-  assert.equal(await lcdFrame(), null, 'Disconnected receiver must not receive LCD updates');
+  assert.equal(await page.frame({ name: 'pendant' }).evaluate(() => window.testLcdReports.length), 0,
+    'Disconnected receiver must not receive even a partial LCD frame');
   await hidEvent('connect');
   await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✓');
   await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x82, 5, 0, 0, 0]);
