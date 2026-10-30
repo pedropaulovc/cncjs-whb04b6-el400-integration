@@ -9,6 +9,18 @@ function machine() {
   return { sim, lines, command: line => sim.input(Buffer.from(line + '\n')) };
 }
 
+test('G10 applies modal words without queuing a move', () => {
+  const { sim, command, lines } = machine();
+  command('G20');
+  command('G21 G10 L20 P1 X0');
+  command('$G');
+  assert.match(lines.at(-2), / G21 /);
+  assert.equal(sim.motion, null);
+  command('G91 G1 X1 F60');
+  sim.tick(1);
+  assert.equal(sim.position[0], 1);
+});
+
 test('fragmented jog stream reports intermediate and completed machine coordinates', () => {
   const { sim, lines } = machine();
   sim.input('$J=G91 G21 X');

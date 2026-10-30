@@ -112,7 +112,6 @@ class GrblSimulator {
     if (codes.includes('G10')) {
       if (values.L !== 20 || values.P !== 1 || this.motion) return error(20);
       axes.forEach((axis, i) => { if (values[axis] !== undefined) this.offset[i] = this.position[i] - values[axis] * scale; });
-      return ok();
     }
     const mode = codes.find(c => c === 'G0' || c === 'G1') || this.mode;
     if (kind === 'Run') {
@@ -120,6 +119,7 @@ class GrblSimulator {
       this.spindleMode = codes.find(c => c === 'M3' || c === 'M4' || c === 'M5') || this.spindleMode;
       if (values.S !== undefined) this.spindle = values.S;
     }
+    if (codes.includes('G10')) return ok();
     if (!axes.some(axis => values[axis] !== undefined)) return ok();
     const previous = this.queue.at(-1)?.target || this.motion?.target || this.position;
     const target = axes.map((axis, i) => {

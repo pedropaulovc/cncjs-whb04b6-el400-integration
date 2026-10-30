@@ -22,6 +22,7 @@ On Windows, prerequisites can be installed from PowerShell:
 ```powershell
 winget install --id Git.Git -e
 winget install --id OpenJS.NodeJS.LTS -e
+winget install --id Microsoft.PowerShell -e
 ```
 
 Reopen the terminal after installing them, then:
@@ -57,8 +58,10 @@ npm start
 1. Open **http://localhost:8000** in Chrome or Edge.
 2. In CNCjs's Connection widget select **Grbl**, port **SIMULATOR**, and baud rate
    **115200**, then click **Open**.
-3. Use **Manage Widgets** to add two Custom Widgets, set the URLs below, and
-   enable each widget. Enlarge the DRO widget to fit its keypad.
+3. In **Manage Widgets**, turn on **Custom Widget** and click **OK**. Use the
+   widget's gear icon to set its title and URL, then enable it. Use **More options
+   → Fork Widget** to create the second widget and change its title and URL.
+   The DRO fits best using **More options → Enter Full Screen**.
 
    | Title | URL |
    | --- | --- |
