@@ -263,11 +263,16 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect(pendantFrame.locator('#macroStatus')).toContainText('available');
   await expect(pendantFrame.getByRole('textbox', { name: 'G-code for Fn + Feed-', exact: true })).toHaveValue('G20\nG21');
   await pendantFrame.getByRole('button', { name: 'Save settings', exact: true }).click();
+  // Start in a distinct mode so the final G21 proves the custom macro drained.
+  const customBaseline = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
+  await customBaseline;
   const customWrites = writes.length;
+  const customCompleted = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
   await macroButton(0x05, 0x0c);
   await expect.poll(() => writes.slice(customWrites).map(line => line.trim()).filter(line => ['G20', 'G21'].includes(line)))
     .toEqual(['G20', 'G21']);
-  await expect.poll(() => latestState.parserstate?.modal?.units).toBe('G21');
+  await customCompleted;
   // A response arriving after Stop must never turn into delayed macro execution.
   await macroApi(`/${savedMacro.id}`, 'PUT', { content: 'G20' });
   let releaseRead;
