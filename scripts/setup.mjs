@@ -13,7 +13,7 @@ const sources = {
   },
   pendant: {
     repository: 'https://github.com/pedropaulovc/cncjs-pendant-whb04b-6.git',
-    revision: '176c6a4eb6bd953ae843e9785c044a60b172014c',
+    revision: '34780994e8bd0b5060ffb630f03b208a80fb66eb',
     directory: path.join(runtime, 'pendant'),
   },
 };
