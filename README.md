@@ -44,11 +44,11 @@ sh ./setup.sh
 ```
 
 `node scripts/setup.mjs` also works directly on either platform. It installs the
-locked CNCjs dependencies, clones pinned versions of both widgets into `.runtime`,
+locked CNCjs and pendant npm packages, clones the pinned EL400 source into `.runtime`,
 and builds EL400. It leaves sibling checkouts and your existing `~/.cncrc` alone.
 Stop CNCjs with Ctrl+C before rerunning setup after an update; Windows locks files
 used by the running server. Setup stops if its managed
-source checkouts contain local changes so they can be saved first.
+EL400 checkout contains local changes so they can be saved first.
 
 ## Practice without a machine
 
@@ -198,7 +198,7 @@ browser permissions, which this launcher does not configure.
 - **Port already in use:** stop the other server or supply `--port`.
 
 Runtime files live under `.runtime/`: `install.json` records widget paths and
-revisions, `cncjs-simulator.json` and `cncjs-machine.json` hold separate server
+the pendant npm version and EL400 revision; `cncjs-simulator.json` and `cncjs-machine.json` hold separate server
 settings. These files can contain credentials and are excluded from Git.
 To rebuild from scratch, stop the server, save any wanted runtime settings, remove
 `.runtime` and `node_modules` from this checkout, and rerun setup. Browser widget

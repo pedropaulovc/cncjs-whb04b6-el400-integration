@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,11 +11,6 @@ const sources = {
     repository: 'https://github.com/pedropaulovc/el400.git',
     revision: 'b374f49d6f01cfd5c0aac5ccde70ba8e98dd531d',
     directory: path.join(runtime, 'el400'),
-  },
-  pendant: {
-    repository: 'https://github.com/pedropaulovc/cncjs-pendant-whb04b-6.git',
-    revision: '7053a7b4cfec06ebaf84042d8fadb13a55af8bc3',
-    directory: path.join(runtime, 'pendant'),
   },
 };
 
@@ -82,11 +78,14 @@ try {
   for (const source of Object.values(sources)) checkout(source);
   run(process.execPath, [npm, 'ci'], sources.el400.directory);
   run(process.execPath, [npm, 'run', 'build', '--', '--base=/el400/'], sources.el400.directory);
+  const require = createRequire(import.meta.url);
+  const pendantPackagePath = require.resolve('cncjs-pendant-whb04b-6/package.json');
+  const pendantPackage = JSON.parse(readFileSync(pendantPackagePath, 'utf8'));
   const config = {
     schemaVersion: 1,
     cncjsVersion: JSON.parse(readFileSync(path.join(root, 'node_modules/cncjs/package.json'), 'utf8')).version,
     el400: { revision: sources.el400.revision, mountPath: path.join(sources.el400.directory, 'dist') },
-    pendant: { revision: sources.pendant.revision, mountPath: path.join(sources.pendant.directory, 'web') },
+    pendant: { version: pendantPackage.version, mountPath: path.join(path.dirname(pendantPackagePath), 'web') },
   };
   for (const filename of [path.join(config.el400.mountPath, 'index.html'),
     path.join(config.pendant.mountPath, 'widget/index.html'),

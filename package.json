@@ -23,7 +23,8 @@
   "dependencies": {
     "@serialport/binding-mock": "10.2.2",
     "@serialport/stream": "10.5.0",
-    "cncjs": "1.11.5"
+    "cncjs": "1.11.5",
+    "cncjs-pendant-whb04b-6": "3.0.0"
   },
   "private": true,
   "license": "MIT",
