@@ -46,6 +46,129 @@ test('feed hold pauses programmed motion and cycle start resumes it', () => {
   assert.equal(sim.state, 'Run');
 });
 
+test('realtime overrides interleave with fragmented G-code without acknowledgments or parser changes', () => {
+  const { sim, lines, command } = machine();
+  sim.input('G1 X10 F');
+  sim.input(Buffer.from([0x91, 0x93, 0x9b, 0x9d]));
+  assert.equal(lines.length, 1);
+  sim.input('600 M3 S500\n?');
+  assert.equal(lines.at(-2), 'ok');
+  assert.match(lines.at(-1), /\|FS:666,445\|Ov:111,100,89>/);
+  command('$G');
+  assert.match(lines.at(-2), / M3 .* F600 S500\]/);
+  sim.tick(0.5);
+  assert.equal(sim.position[0], 5.55);
+});
+
+test('feed overrides change active and queued program timing and preserve hold', () => {
+  const { sim, command, lines } = machine();
+  command('G91 G1 X3 F60'); command('G1 X3');
+  sim.tick(1);
+  sim.input('!');
+  sim.input(Buffer.from(Array(10).fill(0x91)));
+  sim.tick(10); sim.input('?');
+  assert.equal(sim.position[0], 1);
+  assert.match(lines.at(-1), /^<Hold:0.*\|FS:0,0\|Ov:200,100,100>/);
+  sim.input('~'); sim.tick(2);
+  assert.equal(sim.position[0], 5);
+  sim.input(Buffer.from([0x90])); sim.tick(1);
+  assert.equal(sim.position[0], 6);
+  assert.equal(sim.state, 'Idle');
+});
+
+for (const [name, increase, decrease, reset, field] of [
+  ['feed', 0x91, 0x92, 0x90, 'feedOverride'],
+  ['spindle', 0x9a, 0x9b, 0x99, 'spindleOverride'],
+]) test(`${name} overrides clamp at stock GRBL limits and reset independently`, () => {
+  const { sim, lines } = machine();
+  sim.input(Buffer.from(Array(30).fill(increase)));
+  assert.equal(sim[field], 200);
+  sim.input(Buffer.from(Array(30).fill(decrease)));
+  assert.equal(sim[field], 10);
+  sim.input(Buffer.from([reset]));
+  assert.equal(sim[field], 100);
+  assert.equal(lines.length, 1);
+});
+
+test('fine override bytes adjust by one percentage point', () => {
+  const { sim } = machine();
+  sim.input(Buffer.from([0x93, 0x9c]));
+  assert.equal(sim.feedOverride, 101);
+  assert.equal(sim.spindleOverride, 101);
+  sim.input(Buffer.from([0x94, 0x9d]));
+  assert.equal(sim.feedOverride, 100);
+  assert.equal(sim.spindleOverride, 100);
+});
+
+test('jogging ignores feed and rapid overrides while respecting axis maximum rates', () => {
+  const { sim, command, lines } = machine();
+  sim.input(Buffer.from([0x92, 0x97]));
+  command('$J=G91 X100 F600');
+  sim.tick(1); sim.input('?');
+  assert.equal(sim.position[0], 10);
+  assert.match(lines.at(-1), /\|FS:600,0\|Ov:90,25,100>/);
+  sim.input(Buffer.from([0x85]));
+  command('$J=G91 Z100 F6000'); sim.tick(3);
+  assert.equal(sim.position[2], 50);
+});
+
+test('rapid override affects G0 independently of feed override', () => {
+  const { sim, command, lines } = machine();
+  sim.input(Buffer.from([0x92, 0x97]));
+  command('G0 X100'); sim.tick(1); sim.input('?');
+  assert.equal(sim.position[0], 12.5);
+  assert.match(lines.at(-1), /\|FS:750,0\|Ov:90,25,100>/);
+  sim.input(Buffer.from([0x96])); sim.tick(1);
+  assert.equal(sim.position[0], 37.5);
+  sim.input(Buffer.from([0x95])); sim.tick(1);
+  assert.equal(sim.position[0], 87.5);
+});
+
+test('feed override cannot exceed the maximum rate of a participating axis', () => {
+  const { sim, command, lines } = machine();
+  command('G1 Z100 F900');
+  sim.input(Buffer.from(Array(10).fill(0x91))); sim.tick(3); sim.input('?');
+  assert.equal(sim.position[2], 50);
+  assert.match(lines.at(-1), /\|FS:1000,0\|Ov:200,100,100>/);
+});
+
+test('diagonal motion caps each participating axis and zero-length moves finish', () => {
+  const { sim, command, lines } = machine();
+  command('G0 X100 Z100'); sim.tick(3);
+  assert.equal(sim.position[0], 50);
+  assert.equal(sim.position[2], 50);
+  sim.tick(3);
+  command('G0 X100 Z100'); sim.input('?');
+  assert.doesNotMatch(lines.at(-1), /Infinity|NaN/);
+  sim.tick(0);
+  assert.equal(sim.state, 'Idle');
+});
+
+test('spindle status follows overrides and M3/M4/M5 without changing programmed RPM', () => {
+  const { sim, command, lines } = machine();
+  command('M3 S600');
+  sim.input(Buffer.from([0x9a])); sim.input('?');
+  assert.match(lines.at(-1), /\|FS:0,660\|Ov:100,100,110>/);
+  command('M4'); sim.input('?');
+  assert.match(lines.at(-1), /\|FS:0,660\|/);
+  sim.input(Buffer.from(Array(10).fill(0x9a))); sim.input('?');
+  assert.match(lines.at(-1), /\|FS:0,1000\|Ov:100,100,200>/);
+  command('$G');
+  assert.match(lines.at(-2), / M4 .* S600\]/);
+  command('M5'); sim.input('?');
+  assert.match(lines.at(-1), /\|FS:0,0\|Ov:100,100,200>/);
+  command('M3 S0'); sim.input('?');
+  assert.match(lines.at(-1), /\|FS:0,0\|/);
+});
+
+test('soft reset restores all overrides and stops the spindle', () => {
+  const { sim, command, lines } = machine();
+  command('M3 S500');
+  sim.input(Buffer.from([0x91, 0x97, 0x9a, 0x18])); sim.input('?');
+  assert.match(lines.at(-2), /^Grbl 1.1h/);
+  assert.match(lines.at(-1), /\|FS:0,0\|Ov:100,100,100>/);
+});
+
 for (const byte of [0x21, 0x85]) test(`realtime byte 0x${byte.toString(16)} cancels jogging and discards queued jogs`, () => {
   const { sim, command } = machine();
   command('$J=G91 X10 F60');

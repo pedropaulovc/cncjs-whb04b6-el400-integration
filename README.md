@@ -87,9 +87,9 @@ It uses CNCjs's actual serial transport interface and GRBL parser with an in-pro
 mock binding, so no virtual COM driver, `socat`, or administrator access is needed.
 
 The simulator supports XYZ linear moves, standalone `G4 Pseconds` dwells, timed jogging, status queries, hold/resume,
-jog cancel, reset, homing to zero, G20/G21, G90/G91, and G54 work offsets through
+jog cancel, reset, feed/rapid/spindle overrides, homing to zero, G20/G21, G90/G91, and G54 work offsets through
 `G10 L20 P1`. It does not model cutting, acceleration, limits, alarms, arcs, probing,
-override effects, or firmware configuration writes. Unsupported G-code returns an
+or firmware configuration writes. Unsupported G-code returns an
 error. Positions reset on reconnection or restart. Use it to check the controls
 and readout, not to validate a machining program.
 
