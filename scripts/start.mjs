@@ -25,7 +25,7 @@ async function main() {
   let installed;
   try { installed = JSON.parse(await readFile(configPath, 'utf8')); }
   catch (cause) { throw new Error('Run the setup script first; .runtime/install.json could not be read.', { cause }); }
-  if (installed.schemaVersion !== 1) throw new Error('Unsupported installation manifest; rerun setup.');
+  if (installed.schemaVersion !== 2) throw new Error('Outdated installation manifest; rerun setup to install the pendant npm package.');
   await access(resolve(installed.el400.mountPath, 'index.html'));
   await access(resolve(installed.pendant.mountPath, 'widget/index.html'));
   await mkdir(resolve(root, '.runtime'), { recursive: true });

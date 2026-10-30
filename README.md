@@ -44,11 +44,11 @@ sh ./setup.sh
 ```
 
 `node scripts/setup.mjs` also works directly on either platform. It installs the
-locked CNCjs dependencies, clones pinned versions of both widgets into `.runtime`,
+locked CNCjs and pendant npm packages, clones the pinned EL400 source into `.runtime`,
 and builds EL400. It leaves sibling checkouts and your existing `~/.cncrc` alone.
 Stop CNCjs with Ctrl+C before rerunning setup after an update; Windows locks files
 used by the running server. Setup stops if its managed
-source checkouts contain local changes so they can be saved first.
+EL400 checkout contains local changes so they can be saved first.
 
 ## Practice without a machine
 
@@ -198,11 +198,14 @@ browser permissions, which this launcher does not configure.
 - **Port already in use:** stop the other server or supply `--port`.
 
 Runtime files live under `.runtime/`: `install.json` records widget paths and
-revisions, `cncjs-simulator.json` and `cncjs-machine.json` hold separate server
+the pendant npm version and EL400 revision. `cncjs-simulator.json` and
+`cncjs-machine.json` hold separate server
 settings. These files can contain credentials and are excluded from Git.
 To rebuild from scratch, stop the server, save any wanted runtime settings, remove
 `.runtime` and `node_modules` from this checkout, and rerun setup. Browser widget
-layouts and EL400 preferences live in browser storage and are separate.
+layouts and EL400 preferences live in browser storage and are separate. An old
+`.runtime/pendant` checkout is no longer used after setup; you may remove it once
+any local changes are saved.
 
 CNCjs 1.11.5 brings legacy dependencies with npm audit findings. This integration
 pins that dependency tree and listens locally. Review upstream updates before
@@ -221,10 +224,18 @@ Unit tests exercise the GRBL protocol and simulated serial isolation. The
 integration test starts the real CNCjs server, checks widget assets, opens the
 simulator, exercises the pendant's session after G20, and checks machine/work
 coordinates through Socket.IO. It also boots both widgets in Chromium and checks
-the EL400 display after a jog. Browser tests run headlessly. Set `PW_CHANNEL=msedge`
+the EL400 display after a jog. A virtual HID receiver captures the pendant's actual
+LCD packets, including G20/G21 conversion and reconnect behavior.
+Browser tests run headlessly. Set `PW_CHANNEL=msedge`
 to use Edge locally instead of Playwright's bundled Chromium.
 CI runs setup and these tests on Windows and Linux. Hardware WebHID permission
 and physical motion still require the operator checks above.
+
+Publish pendant changes as an npm release from the parent repository before
+updating this integration. Install the chosen release with
+`npm install --save-exact cncjs-pendant-whb04b-6@<version>`, commit both package
+files, then rerun setup and the tests above. Setup serves the installed package's
+`web` directory; it does not read pendant code from a sibling checkout.
 
 ## License
 
