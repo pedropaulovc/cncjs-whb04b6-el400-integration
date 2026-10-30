@@ -314,15 +314,20 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   assert.equal(uncertainJog.jog('X', 0.001, 250), 'sent');
   await expect.poll(() => uncertainJog.jogReceipt?.state).toBe('uncertain');
   await expect.poll(() => uncertainJog.jogTimer).toBe(null);
+  assert.equal(uncertainJog.jogPhase, 'armed', 'Ambiguous motion must retain cancellation ownership');
   assert.equal(uncertainJog.jogCompleted(), false, 'Unknown history must not manufacture completion');
   const laterDwell = event(socket, 'serialport:write', line => line.includes('G4 P1'));
   pendant.command('gcode', ['G4 P1', 'G20']);
   await laterDwell;
   const laterMacro = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
+  const passiveCancel = event(socket, 'serialport:write', line => line.includes('\x85'));
   uncertainJog.cancelJog();
-  await laterMacro;
+  await Promise.all([laterMacro, passiveCancel]);
   await expect.poll(() => uncertainJog.jogPhase).toBe('idle');
   lateSession.disconnect();
+  const restoredUnits = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
+  pendant.command('gcode', 'G21');
+  await restoredUnits;
   // Exercise the mounted widget, real CNCjs directives, and GRBL parser together.
   // Input reports replace USB only; command routing and machine replies are real.
   const report = async detail => {
