@@ -1,0 +1,36 @@
+{
+  "name": "cncjs-whb04b6-el400-integration",
+  "version": "1.0.0",
+  "description": "CNCjs manual milling with WHB04B-6 input, EL400 readout, and GRBL simulation",
+  "scripts": {
+    "start": "node scripts/start.mjs",
+    "test": "node --test test/*.test.cjs",
+    "test:integration": "node --test test/integration.test.mjs",
+    "setup": "node scripts/setup.mjs",
+    "machine": "node scripts/start.mjs --mode machine",
+    "simulate": "node scripts/start.mjs --mode simulator"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedropaulovc/cncjs-whb04b6-el400-integration.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/pedropaulovc/cncjs-whb04b6-el400-integration/issues"
+  },
+  "homepage": "https://github.com/pedropaulovc/cncjs-whb04b6-el400-integration#readme",
+  "dependencies": {
+    "@serialport/binding-mock": "10.2.2",
+    "@serialport/stream": "10.5.0",
+    "cncjs": "1.11.5"
+  },
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1"
+  }
+}
