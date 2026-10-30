@@ -252,18 +252,21 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await macroButton(0x04, 0x0c);
   await expect.poll(() => latestState.parserstate?.modal?.units).toBe('G20');
   await macroApi(`/${savedMacro.id}`, 'PUT', { name: 'Updated units', content: '%units=21\nG[units]' });
-  await expect(assignment.locator('option', { hasText: 'Updated units' })).toHaveCount(1);
+  // CNCjs configstore uses fs.watchFile's ~5 s polling interval.
+  await expect(assignment.locator('option', { hasText: 'Updated units' })).toHaveCount(1, { timeout: 12000 });
   await macroButton(0x04, 0x0c);
   await expect.poll(() => latestState.parserstate?.modal?.units).toBe('G21');
   const customAssignment = pendantFrame.getByRole('combobox', { name: 'Assignment for Fn + Feed-' });
   await customAssignment.selectOption('custom');
   await pendantFrame.getByRole('textbox', { name: 'G-code for Fn + Feed-', exact: true }).fill('G20\nG21');
   await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
+  await expect(pendantFrame.locator('#macroStatus')).toContainText('available');
   await expect(pendantFrame.getByRole('textbox', { name: 'G-code for Fn + Feed-', exact: true })).toHaveValue('G20\nG21');
   await pendantFrame.getByRole('button', { name: 'Save settings', exact: true }).click();
   const customWrites = writes.length;
   await macroButton(0x05, 0x0c);
-  await expect.poll(() => writes.slice(customWrites).some(line => line.trim() === 'G20')).toBe(true);
+  await expect.poll(() => writes.slice(customWrites).map(line => line.trim()).filter(line => ['G20', 'G21'].includes(line)))
+    .toEqual(['G20', 'G21']);
   await expect.poll(() => latestState.parserstate?.modal?.units).toBe('G21');
   // A response arriving after Stop must never turn into delayed macro execution.
   await macroApi(`/${savedMacro.id}`, 'PUT', { content: 'G20' });
@@ -275,13 +278,15 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     const waitingRead = page.waitForRequest(macroUrl, { timeout: 5000 });
     await macroButton(0x04, 0x0c);
     await waitingRead;
+    await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
     await macroButton(0x02);
     releaseRead();
     await expect(pendantFrame.locator('#log')).toContainText('Saved macro request canceled.');
+    await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
     assert.equal(latestState.parserstate?.modal?.units, 'G21');
   } finally { releaseRead(); await page.unroute(macroUrl); }
   await macroApi(`/${savedMacro.id}`, 'DELETE');
-  await expect(assignment.locator('option:checked')).toContainText('Unavailable');
+  await expect(assignment.locator('option:checked')).toContainText(/unavailable/i, { timeout: 12000 });
   await macroButton(0x04, 0x0c);
   await expect(pendantFrame.locator('#log')).toContainText('no longer exists');
   await page.route(`${base}/api/macros`, route => route.fulfill({ status: 401, body: '{}' }));
@@ -322,6 +327,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 10, 50), 'sent');
   await widgetJogging;
   const widgetStopped = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Idle');
+  await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
   await page.frame({ name: 'pendant' }).evaluate(() => {
     if (!window.testPendant) throw new Error('The widget did not register its pendant input handler');
     window.testPendant.dispatchEvent(new CustomEvent('use', { detail: { firstKeyCode: 0x02, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 } }));
