@@ -285,6 +285,10 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
     assert.equal(latestState.parserstate?.modal?.units, 'G21');
   } finally { releaseRead(); await page.unroute(macroUrl); }
+  await macroApi(`/${savedMacro.id}`, 'PUT', { content: 'G0 X[xmin]' });
+  await expect(pendantFrame.locator('#macro-1-note')).toContainText('uses xmin', { timeout: 12000 });
+  await macroButton(0x04, 0x0c);
+  await expect(pendantFrame.locator('#log')).toContainText('uses xmin');
   await macroApi(`/${savedMacro.id}`, 'DELETE');
   await expect(assignment.locator('option:checked')).toContainText(/unavailable/i, { timeout: 12000 });
   await macroButton(0x04, 0x0c);
