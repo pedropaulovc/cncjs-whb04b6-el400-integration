@@ -127,8 +127,9 @@ headless sessions need permissions appropriate to their login setup.
 Start with a small jog and confirm axis direction, step size, work zero, and stop
 behavior with the spindle off and the tool clear. The pendant's software Reset
 and Stop do not replace a wired emergency stop. Stop cancels jogging and clears
-queued commands; programmed motion is feed-held, and the spindle is not switched
-off by Stop. Its upstream Safe-Z and W-Home
+queued CNCjs commands. For a running program, it uses CNCjs's forced stop (hold,
+then controller reset), so Start cannot resume the canceled program. Follow the
+controller's unlock/homing procedure after a reset. Its upstream Safe-Z and W-Home
 macros assume machine Z **-5 mm**; Probe-Z assumes a **50 mm** downward search and
 defaults to a **20 mm** plate. Check those settings against the machine before
 using those buttons. The supported manual workflow here is three-axis GRBL;

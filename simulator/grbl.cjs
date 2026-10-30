@@ -35,18 +35,25 @@ class GrblSimulator {
     for (const byte of Buffer.from(data)) this.byte(byte);
   }
 
+  cancelJog() {
+    if (this.motion?.kind !== 'Jog') return;
+    this.motion = null;
+    this.queue = [];
+    this.state = 'Idle';
+  }
+
   byte(byte) {
     if (byte === 0x18) return this.reset();
     if (byte === 0x3f) return this.status();
-    if (byte === 0x21) { if (this.motion) this.state = 'Hold:0'; return; }
-    if (byte === 0x7e) { if (this.motion) this.state = this.motion.kind; return; }
-    if (byte === 0x85) {
-      if (this.motion?.kind !== 'Jog') return;
-      this.motion = null;
-      this.queue = [];
-      this.state = 'Idle';
+    // GRBL protocol.c: a hold cancels jogging, but Idle enters Hold:0.
+    // https://github.com/gnea/grbl/blob/bfb67f0c7963fe3ce4aaf8a97f9009ea5a8db36e/grbl/protocol.c#L257-L288
+    if (byte === 0x21) {
+      if (this.motion?.kind === 'Jog') return this.cancelJog();
+      this.state = 'Hold:0';
       return;
     }
+    if (byte === 0x7e) { if (this.state.startsWith('Hold')) this.state = this.motion?.kind || 'Idle'; return; }
+    if (byte === 0x85) return this.cancelJog();
     if (byte >= 0x80) return; // Extended overrides are not modeled.
     if (byte === 10 || byte === 13) {
       if (this.inputState === 'overflow') { this.inputState = 'collecting'; return; }

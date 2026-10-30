@@ -35,19 +35,34 @@ test('fragmented jog stream reports intermediate and completed machine coordinat
   assert.match(lines.at(-1), /^<Idle\|MPos:10.000,0.000,0.000/);
 });
 
-test('hold resumes and jog cancel discards queued motion', () => {
+test('feed hold pauses programmed motion and cycle start resumes it', () => {
   const { sim, command } = machine();
-  command('$J=G91 X10 F60');
-  command('$J=G91 X10 F60');
+  command('G91 G1 X10 F60');
   sim.tick(1);
   sim.input('!'); sim.tick(20);
   assert.equal(sim.position[0], 1);
   sim.input('~'); sim.tick(1);
   assert.equal(sim.position[0], 2);
-  sim.input(Buffer.from([0x85])); sim.tick(30);
+  assert.equal(sim.state, 'Run');
+});
+
+for (const byte of [0x21, 0x85]) test(`realtime byte ${byte} cancels jogging and discards queued jogs`, () => {
+  const { sim, command } = machine();
+  command('$J=G91 X10 F60');
+  command('$J=G91 X10 F60');
+  sim.tick(1);
+  sim.input(Buffer.from([byte])); sim.tick(30);
   assert.equal(sim.state, 'Idle');
-  assert.equal(sim.position[0], 2);
+  assert.equal(sim.position[0], 1);
   assert.equal(sim.queue.length, 0);
+});
+
+test('feed hold at Idle enters Hold and cycle start clears it', () => {
+  const { sim } = machine();
+  sim.input('!');
+  assert.equal(sim.state, 'Hold:0');
+  sim.input('~');
+  assert.equal(sim.state, 'Idle');
 });
 
 test('soft reset cancels motion and restores modes without teleporting position', () => {
