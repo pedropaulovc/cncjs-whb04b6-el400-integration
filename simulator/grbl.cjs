@@ -1,5 +1,22 @@
 'use strict';
 
+const MAX_AXIS_RATES = [3000, 3000, 1000];
+const MAX_SPINDLE_RPM = 1000;
+const COOLANT_CODES = { off: 'M9', mist: 'M7', flood: 'M8', both: 'M7 M8' };
+const COOLANT_ACCESSORIES = { off: '', mist: 'M', flood: 'F', both: 'FM' };
+// Stock GRBL 1.1 byte assignments and override limits:
+// https://github.com/gnea/grbl/blob/bfb67f0c7963fe3ce4aaf8a97f9009ea5a8db36e/grbl/config.h
+const OVERRIDE_COMMANDS = new Map([
+  [0x90, ['feedOverride', 'set', 100]], [0x91, ['feedOverride', 'add', 10]],
+  [0x92, ['feedOverride', 'add', -10]], [0x93, ['feedOverride', 'add', 1]],
+  [0x94, ['feedOverride', 'add', -1]],
+  [0x95, ['rapidOverride', 'set', 100]], [0x96, ['rapidOverride', 'set', 50]],
+  [0x97, ['rapidOverride', 'set', 25]],
+  [0x99, ['spindleOverride', 'set', 100]], [0x9a, ['spindleOverride', 'add', 10]],
+  [0x9b, ['spindleOverride', 'add', -10]], [0x9c, ['spindleOverride', 'add', 1]],
+  [0x9d, ['spindleOverride', 'add', -1]],
+]);
+
 // A deliberately limited GRBL 1.1 protocol simulator, not a machining verifier.
 class GrblSimulator {
   constructor(send) {
@@ -23,14 +40,30 @@ class GrblSimulator {
     this.feed = 100;
     this.spindle = 0;
     this.spindleMode = 'M5';
+    this.coolantMode = 'off';
+    this.feedOverride = 100;
+    this.rapidOverride = 100;
+    this.spindleOverride = 100;
     this.buffer = '';
     this.inputState = 'collecting';
     this.send("Grbl 1.1h ['$' for help]");
   }
 
   status() {
-    const feed = this.state === 'Run' || this.state === 'Jog' ? this.motion?.feed || 0 : 0;
-    this.send(`<${this.state}|MPos:${this.position.map(n => n.toFixed(3)).join(',')}|WCO:${this.offset.map(n => n.toFixed(3)).join(',')}|FS:${feed},${this.spindleMode === 'M5' ? 0 : this.spindle}|Ov:100,100,100>`);
+    const feed = this.state === 'Run' || this.state === 'Jog' ? this.motionFeed() : 0;
+    const spindle = this.spindleMode === 'M5' ? 0 : Math.min(MAX_SPINDLE_RPM, this.spindle * this.spindleOverride / 100);
+    const spindleAccessory = spindle === 0 ? '' : this.spindleMode === 'M3' ? 'S' : 'C';
+    const accessories = spindleAccessory + COOLANT_ACCESSORIES[this.coolantMode];
+    this.send(`<${this.state}|MPos:${this.position.map(n => n.toFixed(3)).join(',')}|WCO:${this.offset.map(n => n.toFixed(3)).join(',')}|FS:${feed},${spindle}|Ov:${this.feedOverride},${this.rapidOverride},${this.spindleOverride}${accessories ? '|A:' + accessories : ''}>`);
+  }
+
+  motionFeed() {
+    if (!this.motion || this.motion.kind === 'Idle') return 0;
+    if (this.motion.rateMode === 'rapid') return this.motion.rapidRate * this.rapidOverride / 100;
+    // GRBL jog.c sets PL_COND_FLAG_NO_FEED_OVERRIDE for every jog block.
+    // https://github.com/gnea/grbl/blob/bfb67f0c7963fe3ce4aaf8a97f9009ea5a8db36e/grbl/jog.c#L30
+    const override = this.motion.kind === 'Jog' ? 100 : this.feedOverride;
+    return Math.min(this.motion.rapidRate, this.motion.feed * override / 100);
   }
 
   input(data) {
@@ -59,7 +92,21 @@ class GrblSimulator {
     }
     if (byte === 0x7e) { if (this.state.startsWith('Hold')) this.state = this.motion?.kind || 'Idle'; return; }
     if (byte === 0x85) return this.cancelJog();
-    if (byte >= 0x80) return; // Extended overrides are not modeled.
+    if (byte === 0xa0 || byte === 0xa1) {
+      if (!['Idle', 'Run', 'Jog'].includes(this.state) && !this.state.startsWith('Hold')) return;
+      const transitions = byte === 0xa0
+        ? { off: 'flood', flood: 'off', mist: 'both', both: 'mist' }
+        : { off: 'mist', mist: 'off', flood: 'both', both: 'flood' };
+      this.coolantMode = transitions[this.coolantMode];
+      return;
+    }
+    const override = OVERRIDE_COMMANDS.get(byte);
+    if (override) {
+      const [field, operation, value] = override;
+      this[field] = operation === 'set' ? value : Math.min(200, Math.max(10, this[field] + value));
+      return;
+    }
+    if (byte >= 0x80) return; // Other extended realtime commands are not modeled.
     if (byte === 10 || byte === 13) {
       if (this.inputState === 'overflow') { this.inputState = 'collecting'; return; }
       if (!this.buffer) return;
@@ -79,12 +126,12 @@ class GrblSimulator {
     const error = code => this.send(`error:${code}`);
     if (!line) return ok();
     if (line === '$') { this.send('[HLP:$$ $# $G $I $H $X $J= ~ ! ? ctrl-x]'); return ok(); }
-    if (line === '$I') { this.send('[VER:1.1h:MANUAL-MILL-SIMULATOR]'); this.send('[OPT:V,15,128]'); return ok(); }
+    if (line === '$I') { this.send('[VER:1.1h:MANUAL-MILL-SIMULATOR]'); this.send('[OPT:VM,15,128]'); return ok(); }
     if (line === '$$') {
-      for (const [key, value] of Object.entries({ 0: 10, 1: 25, 10: 1, 13: 0, 20: 0, 21: 0, 22: 0, 30: 1000, 31: 0, 32: 0, 100: 250, 101: 250, 102: 250, 110: 3000, 111: 3000, 112: 1000, 120: 100, 121: 100, 122: 100, 130: 300, 131: 300, 132: 100 })) this.send(`$${key}=${value}`);
+      for (const [key, value] of Object.entries({ 0: 10, 1: 25, 10: 1, 13: 0, 20: 0, 21: 0, 22: 0, 30: MAX_SPINDLE_RPM, 31: 0, 32: 0, 100: 250, 101: 250, 102: 250, 110: MAX_AXIS_RATES[0], 111: MAX_AXIS_RATES[1], 112: MAX_AXIS_RATES[2], 120: 100, 121: 100, 122: 100, 130: 300, 131: 300, 132: 100 })) this.send(`$${key}=${value}`);
       return ok();
     }
-    if (line === '$G') { this.send(`[GC:${this.mode} G54 G17 ${this.units} ${this.distance} G94 ${this.spindleMode} M9 T0 F${this.feed} S${this.spindle}]`); return ok(); }
+    if (line === '$G') { this.send(`[GC:${this.mode} G54 G17 ${this.units} ${this.distance} G94 ${this.spindleMode} ${COOLANT_CODES[this.coolantMode]} T0 F${this.feed} S${this.spindle}]`); return ok(); }
     if (line === '$#') {
       for (const name of ['G54', 'G55', 'G56', 'G57', 'G58', 'G59', 'G28', 'G30', 'G92']) this.send(`[${name}:${(name === 'G54' ? this.offset : [0, 0, 0]).map(n => n.toFixed(3)).join(',')}]`);
       this.send('[TLO:0.000]'); this.send('[PRB:0.000,0.000,0.000:0]'); return ok();
@@ -104,12 +151,12 @@ class GrblSimulator {
     const words = [...source.matchAll(/([A-Z])([-+]?(?:\d+(?:\.\d*)?|\.\d+))/g)];
     if (words.map(m => m[0]).join('') !== source) return error(2);
     const codes = words.filter(m => 'GM'.includes(m[1])).map(m => m[1] + Number(m[2]));
-    if (codes.some(c => !['G0', 'G1', 'G4', 'G10', 'G17', 'G20', 'G21', 'G40', 'G49', 'G53', 'G54', 'G80', 'G90', 'G91', 'G94', 'M3', 'M4', 'M5', 'M8', 'M9'].includes(c))) return error(20);
+    if (codes.some(c => !['G0', 'G1', 'G4', 'G10', 'G17', 'G20', 'G21', 'G40', 'G49', 'G53', 'G54', 'G80', 'G90', 'G91', 'G94', 'M3', 'M4', 'M5', 'M7', 'M8', 'M9'].includes(c))) return error(20);
     if (words.some(m => !'GMXYZFSLPN'.includes(m[1]))) return error(20);
     if (kind === 'Jog' && codes.some(c => !['G20', 'G21', 'G90', 'G91', 'G53'].includes(c))) return error(20);
     const letters = words.filter(m => !'GM'.includes(m[1])).map(m => m[1]);
     if (new Set(letters).size !== letters.length) return error(25);
-    for (const group of [['G0', 'G1', 'G80'], ['G20', 'G21'], ['G90', 'G91'], ['M3', 'M4', 'M5']]) {
+    for (const group of [['G0', 'G1', 'G80'], ['G20', 'G21'], ['G90', 'G91'], ['M3', 'M4', 'M5'], ['M7', 'M8', 'M9']]) {
       if (codes.filter(c => group.includes(c)).length > 1) return error(21);
     }
     const values = Object.fromEntries(words.map(m => [m[1], Number(m[2])]));
@@ -146,6 +193,9 @@ class GrblSimulator {
       this.units = units; this.distance = distance; this.mode = mode; this.feed = feed;
       this.spindleMode = codes.find(c => c === 'M3' || c === 'M4' || c === 'M5') || this.spindleMode;
       if (values.S !== undefined) this.spindle = values.S;
+      if (codes.includes('M7')) this.coolantMode = ['flood', 'both'].includes(this.coolantMode) ? 'both' : 'mist';
+      if (codes.includes('M8')) this.coolantMode = ['mist', 'both'].includes(this.coolantMode) ? 'both' : 'flood';
+      if (codes.includes('M9')) this.coolantMode = 'off';
     }
     if (codes.includes('G10')) return ok();
     if (!axes.some(axis => values[axis] !== undefined)) return ok();
@@ -155,7 +205,11 @@ class GrblSimulator {
       return values[axis] * scale + (codes.includes('G53') ? 0 : this.offset[i]);
     });
     if (target.some(n => !Number.isFinite(n))) return error(2);
-    this.queue.push({ target, feed: kind === 'Run' && mode === 'G0' ? 3000 : feed, kind });
+    const delta = target.map((n, i) => n - previous[i]);
+    const length = Math.hypot(...delta);
+    const rapidRate = length === 0 ? Math.max(...MAX_AXIS_RATES)
+      : Math.min(...delta.map((n, i) => n === 0 ? Infinity : MAX_AXIS_RATES[i] * length / Math.abs(n)));
+    this.queue.push({ target, feed, rapidRate, rateMode: kind === 'Run' && mode === 'G0' ? 'rapid' : 'feed', kind });
     this.next();
     ok();
   }
@@ -194,7 +248,7 @@ class GrblSimulator {
 
   advanceLinear(seconds) {
     const delta = this.motion.target.map((n, i) => n - this.position[i]);
-    const duration = Math.hypot(...delta) / (this.motion.feed / 60);
+    const duration = Math.hypot(...delta) / (this.motionFeed() / 60);
     if (seconds < duration) {
       this.position = this.position.map((n, i) => n + delta[i] * seconds / duration);
       return null;

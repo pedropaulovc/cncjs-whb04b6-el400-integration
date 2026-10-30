@@ -14,6 +14,7 @@ import { chromium, expect } from '@playwright/test';
 const require = createRequire(import.meta.url);
 const cncRequire = createRequire(require.resolve('cncjs/package.json'));
 const io = cncRequire('socket.io-client');
+const GrblRunner = cncRequire('./dist/cncjs/server/controllers/Grbl/GrblRunner.js').default;
 
 function event(socket, name, predicate = () => true, timeout = 15000) {
   return new Promise((resolve, reject) => {
@@ -26,7 +27,42 @@ function event(socket, name, predicate = () => true, timeout = 15000) {
   });
 }
 
-test('real CNCjs serves widgets and reports simulated jog/offset through its controller parser', { timeout: 45000 }, async t => {
+for (const frame of ['MPos', 'WPos']) {
+  test(`pendant preserves ${frame} completion through real CNCjs coordinate broadcasts`, async t => {
+    const installed = JSON.parse(await readFile('.runtime/install.json', 'utf8'));
+    const { CncjsSession } = await import(pathToFileURL(resolve(installed.pendant.mountPath, 'widget/cncjs-session.js')));
+    const { Grbl } = await import(pathToFileURL(resolve(installed.pendant.mountPath, 'widget/grbl.js')));
+    const listeners = new Map(), commands = [];
+    const socket = { connected: true, on: (event, handler) => listeners.set(event, handler),
+      emit: (...args) => commands.push(args), disconnect() {} };
+    const session = new CncjsSession({ io: () => socket, origin: 'http://localhost', schedule: () => 0, cancel() {} });
+    t.after(() => session.disconnect());
+    session.connect('test-token');
+    session.status = { phase: 'joined', port: 'SIMULATOR', controller: 'Grbl' };
+    session.workflowState = 'idle';
+    listeners.get('controller:settings')('Grbl', { settings: { $13: '0', $100: '250', $101: '250', $110: '3000', $111: '3000' } });
+    const grbl = new Grbl(session, () => 20, () => {}, { schedule: () => 0, cancel() {} });
+    const runner = new GrblRunner();
+    const initial = `<Idle|${frame}:0.000,0.000,0.000|WCO:10.000,0.000,0.000|FS:0,0>`;
+    runner.parse(initial);
+    // CNCjs derives both coordinate frames even when GRBL reports only one.
+    assert.equal(Number(runner.state.status.mpos.x) - Number(runner.state.status.wpos.x), 10);
+    listeners.get('controller:state')('Grbl', structuredClone(runner.state));
+    listeners.get('serialport:read')(initial);
+    assert.equal(grbl.jog('X', 0.04, 250), 'sent');
+    const completed = `<Idle|${frame}:0.040,0.000,0.000|FS:0,0>`;
+    runner.parse(completed);
+    listeners.get('serialport:read')(completed);
+    assert.equal(grbl.jogCompleted(), true, 'Raw endpoint must confirm completion');
+    listeners.get('controller:state')('Grbl', structuredClone(runner.state));
+    assert.equal(grbl.jogCompleted(), true, 'The derived coordinate frame must not invalidate completion');
+    grbl.cancelJog();
+    assert.equal(grbl.jog('Y', 0.04, 250), 'sent', 'The first input on another axis must work');
+    assert.ok(commands.every(args => args[2] !== 'jogCancel'), 'A completed move must not trigger cancellation');
+  });
+}
+
+test('real CNCjs serves widgets and reports simulated jog/offset through its controller parser', { timeout: 90000 }, async t => {
   const reservation = createServer();
   reservation.listen(0, '127.0.0.1');
   await once(reservation, 'listening');
@@ -60,6 +96,14 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const socket = io(base, { query: { token }, transports: ['websocket'], reconnection: false });
   const serialTrace = [];
   let workflowState;
+  let latestState;
+  let senderState;
+  let feederState;
+  const writes = [];
+  socket.on('sender:status', state => { senderState = state; });
+  socket.on('feeder:status', state => { feederState = state; });
+  socket.on('serialport:write', line => writes.push(line));
+  socket.on('controller:state', (_, state) => { latestState = state; });
   socket.on('workflow:state', state => { workflowState = state; });
   const trace = entry => { serialTrace.push(entry); if (serialTrace.length > 50) serialTrace.shift(); };
   socket.on('controller:state', (_, state) => trace(state.status?.activeState));
@@ -90,7 +134,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
   await inches;
   const moved = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 5 && state.status.activeState === 'Idle');
-  new Grbl(pendant).jog('X', 5, 0x10);
+  assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await moved;
   const zeroed = event(socket, 'controller:state', (_, state) => Number(state.status?.wpos?.x) === 0 && Number(state.status?.mpos?.x) === 5);
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X0');
@@ -98,7 +142,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const rejected = await new Promise(resolve => socket.emit('open', 'COM1', { controllerType: 'Grbl', baudrate: 115200 }, resolve));
   assert.ok(rejected, 'Simulation must reject hardware even when directly requested');
 
-  const browser = await chromium.launch({ channel: process.env.PW_CHANNEL || undefined, headless: process.env.PW_DISPLAY !== 'headed' });
+  const browser = await chromium.launch({ channel: process.env.PW_CHANNEL || undefined, headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage();
   await page.addInitScript(() => {
@@ -134,24 +178,24 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await droFrame.getByRole('button', { name: /toggle units/i }).click();
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   const movedAgain = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 10 && state.status.activeState === 'Idle');
-  new Grbl(pendant).jog('X', 5, 0x10);
+  assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await movedAgain;
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
   assert.deepEqual(browserErrors, [], 'Mounted widgets must boot without browser errors');
   const widgetJogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
-  new Grbl(pendant).jog('X', 10000, 0x0d);
+  assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 10, 50), 'sent');
   await widgetJogging;
   const widgetStopped = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Idle');
   await page.frame({ name: 'pendant' }).evaluate(() => {
     if (!window.testPendant) throw new Error('The widget did not register its pendant input handler');
-    window.testPendant.dispatchEvent(new CustomEvent('use', { detail: { firstKeyCode: 0x02, jog: 0 } }));
+    window.testPendant.dispatchEvent(new CustomEvent('use', { detail: { firstKeyCode: 0x02, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 } }));
   });
   await widgetStopped;
   await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
   assert.deepEqual(browserErrors, [], 'The actual widget Stop handler must work');
   const jogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
-  const controls = new Grbl(pendant);
-  controls.jog('X', 10000, 0x0d);
+  const controls = new Grbl(pendant, undefined, message => t.diagnostic(message));
+  assert.equal(controls.jog('X', 10, 50), 'sent');
   await jogging;
   const stopped = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Idle', 2000);
   controls.stop();
@@ -183,7 +227,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   controls.stop();
   await Promise.all([reset, cancelled, workflowStopped]).catch(error => { throw new Error(`${error.message}; recent GRBL replies: ${JSON.stringify(serialTrace)}; server: ${output}`); });
   await expect.poll(() => pendant.stopPhase).toBe('idle');
-  controls.cyclestart();
+  pendant.command('cyclestart');
   // Confirm twice to exclude one status reply already in flight before Start.
   for (let report = 0; report < 2; report++) {
     const afterStart = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
@@ -203,7 +247,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   controls.stop();
   await Promise.all([dwellReset, dwellWorkflowStopped]);
   await expect.poll(() => pendant.stopPhase).toBe('idle');
-  controls.cyclestart();
+  pendant.command('cyclestart');
   for (let report = 0; report < 2; report++) {
     const afterDwellStart = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
     pendant.command('statusreport');
@@ -226,5 +270,178 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     pendant.command('statusreport');
     assert.match((await mdiStatus)[0], /^<Idle\|/, 'The queued MDI move must not run after Stop');
   }
+  // A dwell reports Idle while CNCjs still owns unsent feeder commands.
+  // Out-and-back jogs must remain cancellable until they actually reach GRBL.
+  const queuedJog = new Grbl(pendant, undefined, message => t.diagnostic(message));
+  t.after(() => queuedJog.clearJog());
+  assert.equal(pendant.replyTracking, 'synchronized', 'Earlier Stop reset must establish acknowledgement tracking');
+  const queuedDwell = event(socket, 'serialport:write', line => line.includes('G4 P5'));
+  pendant.command('gcode', ['G4 P5', 'G4 P0']);
+  await queuedDwell;
+  const writeStart = writes.length;
+  assert.equal(queuedJog.jog('X', 0.04, 250), 'sent');
+  assert.equal(queuedJog.jog('X', -0.04, 250), 'sent');
+  const issuedSequence = pendant.reportSequence;
+  await Promise.all([
+    expect.poll(() => pendant.reportSequence, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(issuedSequence + 2),
+    expect.poll(() => feederState?.queue, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(3),
+  ]);
+  assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Regression setup must leave both jogs queued behind the dwell');
+  assert.equal(queuedJog.jogCompleted(), false, 'Idle before queued jog acknowledgements must not complete the jog');
+  const cancelWrite = event(socket, 'serialport:write', line => line.includes('\x85'));
+  queuedJog.cancelJog();
+  await cancelWrite;
+  await expect.poll(() => queuedJog.jogPhase).toBe('idle');
+  // A subsequent acknowledged modal command proves the dwell/feeder drained.
+  const queuedDrained = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
+  pendant.command('gcode', 'G21');
+  await queuedDrained;
+  assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Canceled queued jogs must never be sent');
+  const completedWrites = writes.length;
+  assert.equal(queuedJog.jog('X', 0.04, 250), 'sent');
+  assert.equal(queuedJog.jog('X', -0.04, 250), 'sent');
+  await expect.poll(() => queuedJog.jogPhase).toBe('idle');
+  assert.equal(writes.slice(completedWrites).filter(line => line.startsWith('$J=')).length, 2,
+    'An acknowledged out-and-back pair must finish without leaving the pendant locked');
+  // A widget joining an open controller cannot correlate pre-join replies.
+  // Keep its cancellation armed without polling forever or deleting later MDI work.
+  const lateSession = new CncjsSession({ io, origin: base });
+  t.after(() => lateSession.disconnect());
+  lateSession.connect(token);
+  await expect.poll(() => lateSession.status.phase).toBe('joined');
+  const uncertainJog = new Grbl(lateSession, undefined, message => t.diagnostic(message));
+  t.after(() => uncertainJog.clearJog());
+  assert.equal(uncertainJog.jog('X', 0.001, 250), 'sent');
+  await expect.poll(() => uncertainJog.jogReceipt?.state).toBe('uncertain');
+  await expect.poll(() => uncertainJog.jogTimer).toBe(null);
+  assert.equal(uncertainJog.jogPhase, 'armed', 'Ambiguous motion must retain cancellation ownership');
+  assert.equal(uncertainJog.jogCompleted(), false, 'Unknown history must not manufacture completion');
+  const laterDwell = event(socket, 'serialport:write', line => line.includes('G4 P1'));
+  pendant.command('gcode', ['G4 P1', 'G20']);
+  await laterDwell;
+  const laterMacro = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
+  const passiveCancel = event(socket, 'serialport:write', line => line.includes('\x85'));
+  uncertainJog.cancelJog();
+  await Promise.all([laterMacro, passiveCancel]);
+  await expect.poll(() => uncertainJog.jogPhase).toBe('idle');
+  lateSession.disconnect();
+  const restoredUnits = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
+  pendant.command('gcode', 'G21');
+  await restoredUnits;
+  // Exercise the mounted widget, real CNCjs directives, and GRBL parser together.
+  // Input reports replace USB only; command routing and machine replies are real.
+  const report = async detail => {
+    await page.frame({ name: 'pendant' }).evaluate(detail => {
+      window.testPendant.dispatchEvent(new CustomEvent('use', { detail }));
+    }, { firstKeyCode: 0, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0, ...detail });
+  };
+  const press = async (code, modifier = 0, rightDialCode = 0x0f) => {
+    await report({ firstKeyCode: code, secondKeyCode: modifier, rightDialCode });
+    await report({ rightDialCode });
+  };
+  const getPosition = () => ['x', 'y', 'z'].map(axis => Number(latestState.status.mpos[axis]));
+  const stationary = getPosition();
+  await pendantFrame.locator('#thickness').fill('');
+  await press(0x0d);
+  await expect(pendantFrame.locator('#log')).toContainText('Enter a valid nonnegative probe plate thickness.');
+  assert.deepEqual(getPosition(), stationary, 'A blank probe thickness must not start a probe');
+  await report({ jog: -2 });
+  await expect.poll(() => latestState.status.ov?.[0]).toBe(98);
+  await report({ rightDialCode: 0x9b, jog: 3 });
+  await expect.poll(() => latestState.status.ov?.[2]).toBe(103);
+  assert.deepEqual(getPosition(), stationary, 'Lead must adjust spindle override without jogging');
+  await report({ rightDialCode: 0x1b });
+  await expect.poll(() => latestState.status.ov?.[0]).toBe(100);
+  await report({ rightDialCode: 0x1b, jog: -2 });
+  await expect.poll(() => latestState.status.ov?.[0]).toBe(98);
+  assert.deepEqual(getPosition(), stationary, 'Returning from Lead must select MPG feed override');
+  await press(0x04, 0, 0x1b);
+  await expect.poll(() => latestState.status.ov?.[0]).toBe(99);
+
+  const spindlePrepared = event(socket, 'controller:state', (_, state) => Number(state.parserstate?.spindle) === 500);
+  pendant.command('gcode', 'S500');
+  await spindlePrepared;
+  await press(0x0b, 0, 0x1b);
+  await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M3');
+  await expect.poll(() => Number(latestState.status.spindle)).toBe(515);
+  await press(0x07, 0, 0x1b);
+  await expect.poll(() => latestState.status.ov?.[2]).toBe(102);
+  await expect.poll(() => Number(latestState.status.spindle)).toBe(510);
+  await press(0x0b, 0, 0x1b);
+  await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M5');
+  await press(0x06, 0x0c, 0x1b); // Fn + Spindle+: programmed RPM.
+  await expect.poll(() => Number(latestState.parserstate?.spindle)).toBe(600);
+  await press(0x0b, 0x0c, 0x1b); // Fn + spindle: next start direction.
+  await press(0x0b, 0, 0x1b);
+  await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M4');
+  await press(0x0b, 0, 0x1b);
+  await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M5');
+  await press(0x0e, 0x0c, 0x1b); // Fn + Continuous: flood coolant.
+  await expect.poll(() => latestState.parserstate?.modal?.coolant).toBe('M8');
+  await press(0x0f, 0x0c, 0x1b); // Fn + Step: mist coolant.
+  await expect.poll(() => latestState.parserstate?.modal?.coolant).toEqual(['M7', 'M8']);
+  await press(0x0e, 0x0c, 0x1b);
+  await expect.poll(() => latestState.parserstate?.modal?.coolant).toBe('M7');
+  await press(0x0f, 0x0c, 0x1b);
+  await expect.poll(() => latestState.parserstate?.modal?.coolant).toBe('M9');
+
+  await press(0x0f, 0, 0x0e); // Step, 0.01 mm per detent.
+  await report({ rightDialCode: 0x0e, jog: 4 });
+  await expect.poll(() => Number(latestState.status.mpos.x)).toBeCloseTo(stationary[0] + 0.04, 3);
+  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  // CNCjs's automatic status broadcasts must suffice; the test sends no extra
+  // raw status requests to make the pendant's cancellation guard recover.
+  await report({ leftDialCode: 0x12, rightDialCode: 0x0e, jog: 4 });
+  await expect.poll(() => Number(latestState.status.mpos.y)).toBeCloseTo(stationary[1] + 0.04, 3);
+  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  const stepped = getPosition();
+  await press(0x0e, 0, 0x0d); // Continuous at 2% of the controller maximum.
+  const beforeContinuous = writes.length;
+  await report({ rightDialCode: 0x0d, jog: 1 });
+  // A short jog can finish between CNCjs status polls; verify actual travel.
+  await expect.poll(() => Number(latestState.status.mpos.x)).toBeGreaterThan(stepped[0]).catch(async error => {
+    throw new Error(`${error.message}; pendant log: ${await pendantFrame.locator('#log').textContent()}; recent status: ${JSON.stringify(serialTrace)}`);
+  });
+  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  await expect.poll(() => writes.slice(beforeContinuous).some(line => line.includes('\x85'))).toBe(true);
+  assert.ok(writes.slice(beforeContinuous).some(line => /\$J=.*F60(?:\.000)?\b/.test(line)), 'Continuous must use 2% of the X maximum, 60 mm/min');
+  const continuousDistance = Number(latestState.status.mpos.x) - stepped[0];
+  assert.ok(continuousDistance > 0 && continuousDistance < 1, `Continuous jog must stop after wheel inactivity, moved ${continuousDistance} mm`);
+  await expect(pendantFrame.locator('#log')).toContainText('GRBL override minimum is 10%');
+  await expect.poll(() => latestState.status.ov?.[0], { timeout: 10000 }).toBe(10);
+  const beforeUnsupportedAxis = writes.length;
+  const beforeUnsupportedPosition = getPosition();
+  await report({ leftDialCode: 0x14, rightDialCode: 0x0d, jog: 5 });
+  await expect(pendantFrame.locator('#log')).toContainText('GRBL supports XYZ; A/B/C wheel input ignored.');
+  for (let confirmation = 0; confirmation < 2; confirmation++) {
+    const status = event(socket, 'serialport:read', line => line.startsWith('<'));
+    pendant.command('statusreport');
+    await status;
+  }
+  assert.ok(writes.slice(beforeUnsupportedAxis).every(line => !line.includes('$J=')), 'Unsupported axes must not emit a jog command');
+  assert.deepEqual(getPosition(), beforeUnsupportedPosition, 'The A selector must not move a vanilla three-axis GRBL machine');
+
+  // Start/Pause must also update CNCjs's sender, so resume sends pending lines.
+  const pauseLoaded = event(socket, 'gcode:load');
+  socket.emit('command', 'SIMULATOR', 'gcode:load', 'pause-resume.nc', ['G21 G91', ...Array(80).fill('G1 X0.5 F300')].join('\n'));
+  await pauseLoaded;
+  await press(0x03, 0, 0x0d);
+  await expect.poll(() => workflowState).toBe('running');
+  await expect.poll(() => latestState.status.activeState).toBe('Run');
+  await press(0x03, 0, 0x0d);
+  await expect.poll(() => workflowState).toBe('paused');
+  await expect.poll(() => latestState.status.activeState).toBe('Hold');
+  const sentBeforeResume = senderState.sent;
+  assert.ok(sentBeforeResume < senderState.total, 'The test program must leave unsent lines in CNCjs');
+  await press(0x03, 0, 0x0d);
+  await expect.poll(() => workflowState).toBe('running');
+  await expect.poll(() => latestState.status.activeState).toBe('Run');
+  await expect.poll(() => senderState.sent).toBeGreaterThan(sentBeforeResume);
+  await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
+  await press(0x02, 0, 0x0d);
+  await expect.poll(() => workflowState).toBe('idle');
+  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
+  assert.deepEqual(browserErrors, [], 'LinuxCNC-style pendant controls must run without browser errors');
   socket.disconnect();
 });
