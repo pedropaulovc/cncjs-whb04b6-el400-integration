@@ -202,5 +202,17 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   controls.stop();
   await dwellReset;
   await expect.poll(() => pendant.stopPhase).toBe('idle');
+  // CNCjs's feeder sends one line per acknowledgment, unlike its program sender.
+  // Stop must remove the move still queued behind this MDI dwell.
+  const mdiDwellSent = event(socket, 'serialport:write', line => line.replace(/\s/g, '').includes('G4P1'));
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G4 P1\nG91 G1 X10 F50');
+  await mdiDwellSent;
+  controls.stop();
+  await expect.poll(() => pendant.stopPhase).toBe('idle');
+  // Observing G20 establishes that GRBL processed commands after the dwell.
+  const mdiDrained = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
+  pendant.command('gcode', 'G20');
+  const [, mdiState] = await mdiDrained;
+  assert.equal(mdiState.status.activeState, 'Idle', 'The queued MDI move must not run after Stop');
   socket.disconnect();
 });
