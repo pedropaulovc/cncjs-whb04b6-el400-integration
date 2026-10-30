@@ -15,9 +15,9 @@ const require = createRequire(import.meta.url);
 const cncRequire = createRequire(require.resolve('cncjs/package.json'));
 const io = cncRequire('socket.io-client');
 
-function event(socket, name, predicate = () => true) {
+function event(socket, name, predicate = () => true, timeout = 15000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { socket.off(name, listener); reject(new Error(`Timed out: ${name}`)); }, 15000);
+    const timer = setTimeout(() => { socket.off(name, listener); reject(new Error(`Timed out: ${name}`)); }, timeout);
     const listener = (...args) => {
       if (!predicate(...args)) return;
       clearTimeout(timer); socket.off(name, listener); resolve(args);
@@ -124,5 +124,13 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await movedAgain;
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
   assert.deepEqual(browserErrors, [], 'Mounted widgets must boot without browser errors');
+  const jogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
+  const controls = new Grbl(pendant);
+  controls.jog('X', 10000, 0x0d);
+  await jogging;
+  const stopped = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Idle', 2000);
+  controls.stop();
+  const [, stoppedState] = await stopped;
+  assert.ok(Number(stoppedState.status.mpos.x) < 20, 'Stop must cancel before the jog target');
   socket.disconnect();
 });
