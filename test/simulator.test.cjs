@@ -53,7 +53,7 @@ test('realtime overrides interleave with fragmented G-code without acknowledgmen
   assert.equal(lines.length, 1);
   sim.input('600 M3 S500\n?');
   assert.equal(lines.at(-2), 'ok');
-  assert.match(lines.at(-1), /\|FS:666,445\|Ov:111,100,89>/);
+  assert.match(lines.at(-1), /\|FS:666,445\|Ov:111,100,89\|A:S>/);
   command('$G');
   assert.match(lines.at(-2), / M3 .* F600 S500\]/);
   sim.tick(0.5);
@@ -148,11 +148,11 @@ test('spindle status follows overrides and M3/M4/M5 without changing programmed 
   const { sim, command, lines } = machine();
   command('M3 S600');
   sim.input(Buffer.from([0x9a])); sim.input('?');
-  assert.match(lines.at(-1), /\|FS:0,660\|Ov:100,100,110>/);
+  assert.match(lines.at(-1), /\|FS:0,660\|Ov:100,100,110\|A:S>/);
   command('M4'); sim.input('?');
-  assert.match(lines.at(-1), /\|FS:0,660\|/);
+  assert.match(lines.at(-1), /\|FS:0,660\|.*\|A:C>/);
   sim.input(Buffer.from(Array(10).fill(0x9a))); sim.input('?');
-  assert.match(lines.at(-1), /\|FS:0,1000\|Ov:100,100,200>/);
+  assert.match(lines.at(-1), /\|FS:0,1000\|Ov:100,100,200\|A:C>/);
   command('$G');
   assert.match(lines.at(-2), / M4 .* S600\]/);
   command('M5'); sim.input('?');
@@ -167,6 +167,55 @@ test('soft reset restores all overrides and stops the spindle', () => {
   sim.input(Buffer.from([0x91, 0x97, 0x9a, 0x18])); sim.input('?');
   assert.match(lines.at(-2), /^Grbl 1.1h/);
   assert.match(lines.at(-1), /\|FS:0,0\|Ov:100,100,100>/);
+});
+
+test('mist and flood coexist across blocks and M9 clears both', () => {
+  const { sim, command, lines } = machine();
+  command('$I');
+  assert.ok(lines.includes('[OPT:VM,15,128]'));
+  command('M7'); command('$G');
+  assert.match(lines.at(-2), / M5 M7 T0 /);
+  command('M8'); command('$G');
+  assert.match(lines.at(-2), / M5 M7 M8 T0 /);
+  const Parser = require('cncjs/dist/cncjs/server/controllers/Grbl/GrblLineParserResultParserState').default;
+  assert.deepEqual(Parser.parse(lines.at(-2)).payload.modal.coolant, ['M7', 'M8']);
+  command('M3 S500'); sim.input('?');
+  assert.match(lines.at(-1), /\|A:SFM>/);
+  command('M9'); sim.input('?');
+  assert.match(lines.at(-1), /\|A:S>/);
+  command('M8'); command('M7'); command('$G');
+  assert.match(lines.at(-2), / M3 M7 M8 T0 /);
+  command('M9'); command('M5'); sim.input('?');
+  assert.doesNotMatch(lines.at(-1), /\|A:/);
+});
+
+test('realtime coolant toggles update modal state independently and emit no ACK', () => {
+  const { sim, command, lines } = machine();
+  sim.input(Buffer.from([0xa0, 0xa1]));
+  assert.equal(lines.length, 1);
+  sim.input('?');
+  assert.match(lines.at(-1), /\|A:FM>/);
+  sim.input(Buffer.from([0xa0])); command('$G');
+  assert.match(lines.at(-2), / M5 M7 T0 /);
+  sim.input(Buffer.from([0xa1])); command('$G');
+  assert.match(lines.at(-2), / M5 M9 T0 /);
+  sim.state = 'Alarm';
+  sim.input(Buffer.from([0xa0, 0xa1]));
+  assert.equal(sim.coolantMode, 'off');
+});
+
+test('conflicting coolant words fail and soft reset turns all accessories off', () => {
+  const { sim, command, lines } = machine();
+  for (const line of ['M7 M8', 'M7 M9', 'M8 M9']) {
+    command(line);
+    assert.equal(lines.at(-1), 'error:21');
+    assert.equal(sim.coolantMode, 'off');
+  }
+  command('M4 S500'); command('M8'); command('M7');
+  sim.input(Buffer.from([0x18])); command('$G');
+  assert.match(lines.at(-2), / M5 M9 T0 /);
+  sim.input('?');
+  assert.doesNotMatch(lines.at(-1), /\|A:/);
 });
 
 for (const byte of [0x21, 0x85]) test(`realtime byte 0x${byte.toString(16)} cancels jogging and discards queued jogs`, () => {
