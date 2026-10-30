@@ -98,8 +98,10 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   let workflowState;
   let latestState;
   let senderState;
+  let feederState;
   const writes = [];
   socket.on('sender:status', state => { senderState = state; });
+  socket.on('feeder:status', state => { feederState = state; });
   socket.on('serialport:write', line => writes.push(line));
   socket.on('controller:state', (_, state) => { latestState = state; });
   socket.on('workflow:state', state => { workflowState = state; });
@@ -270,16 +272,20 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   }
   // A dwell reports Idle while CNCjs still owns unsent feeder commands.
   // Out-and-back jogs must remain cancellable until they actually reach GRBL.
-  const queuedJog = new Grbl(pendant);
+  const queuedJog = new Grbl(pendant, undefined, message => t.diagnostic(message));
   t.after(() => queuedJog.clearJog());
-  const queuedDwell = event(socket, 'serialport:write', line => line.includes('G4 P2'));
-  pendant.command('gcode', ['G4 P2', 'G4 P0']);
+  assert.equal(pendant.replyTracking, 'synchronized', 'Earlier Stop reset must establish acknowledgement tracking');
+  const queuedDwell = event(socket, 'serialport:write', line => line.includes('G4 P5'));
+  pendant.command('gcode', ['G4 P5', 'G4 P0']);
   await queuedDwell;
   const writeStart = writes.length;
   assert.equal(queuedJog.jog('X', 0.04, 250), 'sent');
   assert.equal(queuedJog.jog('X', -0.04, 250), 'sent');
   const issuedSequence = pendant.reportSequence;
-  await expect.poll(() => pendant.reportSequence).toBeGreaterThanOrEqual(issuedSequence + 2);
+  await Promise.all([
+    expect.poll(() => pendant.reportSequence, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(issuedSequence + 2),
+    expect.poll(() => feederState?.queue, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(3),
+  ]);
   assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Regression setup must leave both jogs queued behind the dwell');
   assert.equal(queuedJog.jogCompleted(), false, 'Idle before queued jog acknowledgements must not complete the jog');
   const cancelWrite = event(socket, 'serialport:write', line => line.includes('\x85'));
