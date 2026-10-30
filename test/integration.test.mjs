@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
+import { pathToFileURL } from 'node:url';
 
 // Use the client shipped with the pinned CNCjs server so protocol versions agree.
 const require = createRequire(import.meta.url);
@@ -64,11 +65,28 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   assert.deepEqual(ports.map(p => p.port), ['SIMULATOR']);
   await new Promise((resolve, reject) => socket.emit('open', 'SIMULATOR', { controllerType: 'Grbl', baudrate: 115200 }, err => err ? reject(new Error(String(err))) : resolve()));
   await event(socket, 'controller:state', (type, state) => type === 'Grbl' && state.status?.activeState === 'Idle');
+  const installed = JSON.parse(await readFile('.runtime/install.json', 'utf8'));
+  const { CncjsSession } = await import(pathToFileURL(resolve(installed.pendant.mountPath, 'widget/cncjs-session.js')));
+  const { Grbl } = await import(pathToFileURL(resolve(installed.pendant.mountPath, 'widget/grbl.js')));
+  let joined;
+  const ready = new Promise(resolve => { joined = resolve; });
+  const pendant = new CncjsSession({ io, origin: base, onStatus: status => { if (status.phase === 'joined') joined(); } });
+  t.after(() => pendant.disconnect());
+  pendant.connect(token);
+  await Promise.race([ready, new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error('Pendant failed to join real CNCjs controller')), 10000);
+    timer.unref();
+    ready.then(() => clearTimeout(timer));
+  })]);
+  assert.equal(pendant.status.port, 'SIMULATOR');
+  const inches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
+  await inches;
   const moved = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 5 && state.status.activeState === 'Idle');
-  socket.emit('command', 'SIMULATOR', 'gcode', '$J=G91 G21 X5 F600');
+  new Grbl(pendant).jog('X', 5, 0x10);
   await moved;
   const zeroed = event(socket, 'controller:state', (_, state) => Number(state.status?.wpos?.x) === 0 && Number(state.status?.mpos?.x) === 5);
-  socket.emit('command', 'SIMULATOR', 'gcode', 'G10 L20 P1 X0');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X0');
   await zeroed;
   const rejected = await new Promise(resolve => socket.emit('open', 'COM1', { controllerType: 'Grbl', baudrate: 115200 }, resolve));
   assert.ok(rejected, 'Simulation must reject hardware even when directly requested');
