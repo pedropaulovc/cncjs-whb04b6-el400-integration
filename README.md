@@ -72,7 +72,7 @@ npm start
 4. Plug in the pendant receiver and click **Connect pendant** inside its widget.
    Choose the WHB04B-6 device in the browser prompt. This permission needs an
    operator click; it cannot be granted by the setup script.
-5. Select X on the pendant, choose a small step, and turn the wheel. CNCjs and
+5. Press **Step**, select X on the pendant, choose a small step, and turn the wheel. CNCjs and
    the EL400 should follow the simulated position. Without a pendant, use
    CNCjs's jog buttons or enter `$J=G91 G21 X5 F600` in its console.
 
@@ -87,11 +87,37 @@ It uses CNCjs's actual serial transport interface and GRBL parser with an in-pro
 mock binding, so no virtual COM driver, `socat`, or administrator access is needed.
 
 The simulator supports XYZ linear moves, standalone `G4 Pseconds` dwells, timed jogging, status queries, hold/resume,
-jog cancel, reset, feed/rapid/spindle overrides, homing to zero, G20/G21, G90/G91, and G54 work offsets through
+jog cancel, reset, feed/rapid/spindle overrides, spindle and coolant state, homing to zero, G20/G21, G90/G91, and G54 work offsets through
 `G10 L20 P1`. It does not model cutting, acceleration, limits, alarms, arcs, probing,
 or firmware configuration writes. Unsupported G-code returns an
 error. Positions reset on reconnection or restart. Use it to check the controls
 and readout, not to validate a machining program.
+
+## Pendant controls
+
+The pendant follows [LinuxCNC's WHB04B-6 mappings](https://www.linuxcnc.org/docs/master/html/en/man/man1/xhc-whb04b-6.1.html)
+where GRBL supports them. It starts in **MPG**, which adjusts feed override.
+Press **Step** or **Continuous** before using the wheel to move an axis.
+
+| Mode | Wheel behavior |
+| --- | --- |
+| MPG | Adjust feed override |
+| Lead | Adjust spindle override; never jog |
+| Step | Move the selected distance per detent; finish the requested move after the wheel stops |
+| Continuous | Jog at the selected percentage of the axis maximum rate; cancel when wheel reports stop |
+
+Leaving Lead returns to MPG. Step sizes are **0.001, 0.01, 0.1, 1, 5, and 10 mm**;
+the 5/10 mm settings require explicit enablement in the pendant widget. These
+replace the previous 10/50 mm mappings. The widget also configures step feed,
+spindle speed increments, and custom macros. Settings are local to the browser
+and CNCjs address.
+
+Feed +/- and Spindle +/- adjust overrides. **Fn + Spindle +/-** changes the
+programmed RPM; **Fn + S on/off** selects the next spindle direction while
+stopped. **Fn + Continuous/Step** toggles flood/mist coolant. GRBL firmware must
+support mist for that function. **Start/Pause** starts, pauses, or resumes the
+CNCjs program; **Stop** cancels it. The parent pendant repository documents the
+[full mapping and configuration](https://github.com/pedropaulovc/cncjs-pendant-whb04b-6#readme).
 
 ## Connect a physical GRBL machine
 
