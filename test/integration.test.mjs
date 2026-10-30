@@ -268,6 +268,35 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     pendant.command('statusreport');
     assert.match((await mdiStatus)[0], /^<Idle\|/, 'The queued MDI move must not run after Stop');
   }
+  // A dwell reports Idle while CNCjs still owns unsent feeder commands.
+  // Out-and-back jogs must remain cancellable until they actually reach GRBL.
+  const queuedJog = new Grbl(pendant);
+  t.after(() => queuedJog.clearJog());
+  const queuedDwell = event(socket, 'serialport:write', line => line.includes('G4 P2'));
+  pendant.command('gcode', ['G4 P2', 'G4 P0']);
+  await queuedDwell;
+  const writeStart = writes.length;
+  assert.equal(queuedJog.jog('X', 0.04, 250), 'sent');
+  assert.equal(queuedJog.jog('X', -0.04, 250), 'sent');
+  const issuedSequence = pendant.reportSequence;
+  await expect.poll(() => pendant.reportSequence).toBeGreaterThanOrEqual(issuedSequence + 2);
+  assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Regression setup must leave both jogs queued behind the dwell');
+  assert.equal(queuedJog.jogCompleted(), false, 'Idle before queued jog acknowledgements must not complete the jog');
+  const cancelWrite = event(socket, 'serialport:write', line => line.includes('\x85'));
+  queuedJog.cancelJog();
+  await cancelWrite;
+  await expect.poll(() => queuedJog.jogPhase).toBe('idle');
+  // A subsequent acknowledged modal command proves the dwell/feeder drained.
+  const queuedDrained = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
+  pendant.command('gcode', 'G21');
+  await queuedDrained;
+  assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Canceled queued jogs must never be sent');
+  const completedWrites = writes.length;
+  assert.equal(queuedJog.jog('X', 0.04, 250), 'sent');
+  assert.equal(queuedJog.jog('X', -0.04, 250), 'sent');
+  await expect.poll(() => queuedJog.jogPhase).toBe('idle');
+  assert.equal(writes.slice(completedWrites).filter(line => line.startsWith('$J=')).length, 2,
+    'An acknowledged out-and-back pair must finish without leaving the pendant locked');
   // Exercise the mounted widget, real CNCjs directives, and GRBL parser together.
   // Input reports replace USB only; command routing and machine replies are real.
   const report = async detail => {
