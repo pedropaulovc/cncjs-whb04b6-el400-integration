@@ -46,7 +46,8 @@ sh ./setup.sh
 `node scripts/setup.mjs` also works directly on either platform. It installs the
 locked CNCjs dependencies, clones pinned versions of both widgets into `.runtime`,
 and builds EL400. It leaves sibling checkouts and your existing `~/.cncrc` alone.
-Rerun the setup script after pulling integration updates. It stops if its managed
+Stop CNCjs with Ctrl+C before rerunning setup after an update; Windows locks files
+used by the running server. Setup stops if its managed
 source checkouts contain local changes so they can be saved first.
 
 ## Practice without a machine
@@ -157,7 +158,8 @@ browser permissions, which this launcher does not configure.
   USB connection. Check Linux hidraw permissions and close other apps using it.
 - **Build/install failure:** read the command printed before the failure. Setup
   needs access to GitHub and the npm registry. Rerunning setup preserves clean
-  pinned source clones and reinstalls dependencies from their lockfiles.
+  pinned source clones and reinstalls dependencies from their lockfiles. If npm
+  reports `EBUSY`, stop any CNCjs process running from this checkout and rerun.
 - **Port already in use:** stop the other server or supply `--port`.
 
 Runtime files live under `.runtime/`: `install.json` records widget paths and
