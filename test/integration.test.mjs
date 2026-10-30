@@ -199,9 +199,17 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   socket.emit('command', 'SIMULATOR', 'gcode:start');
   await dwellSent;
   const dwellReset = event(socket, 'serialport:read', line => line.startsWith('Grbl'), 3000);
+  const dwellWorkflowStopped = event(socket, 'workflow:state', state => state === 'idle', 3000);
   controls.stop();
-  await dwellReset;
+  await Promise.all([dwellReset, dwellWorkflowStopped]);
   await expect.poll(() => pendant.stopPhase).toBe('idle');
+  controls.cyclestart();
+  for (let report = 0; report < 2; report++) {
+    const afterDwellStart = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
+    pendant.command('statusreport');
+    assert.match((await afterDwellStart)[0], /^<Idle\|/, 'Start must not resume a program canceled during dwell');
+    assert.equal(workflowState, 'idle', 'Start must not restart the sender after dwell cancellation');
+  }
   // CNCjs's feeder sends one line per acknowledgment, unlike its program sender.
   // Stop must remove the move still queued behind this MDI dwell.
   const mdiDwellSent = event(socket, 'serialport:write', line => line.replace(/\s/g, '').includes('G4P1'));
