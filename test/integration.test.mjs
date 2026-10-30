@@ -105,7 +105,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     // Capture the real driver's EventTarget to inject pendant input without USB.
     const add = EventTarget.prototype.addEventListener;
     EventTarget.prototype.addEventListener = function (type, ...args) {
-      if (type === 'use') window.testPendant = this;
+      if (type === 'use' && this.constructor.name === 'WHB04BWebHID') window.testPendant = this;
       return add.call(this, type, ...args);
     };
   });
@@ -143,6 +143,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await widgetJogging;
   const widgetStopped = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Idle');
   await page.frame({ name: 'pendant' }).evaluate(() => {
+    if (!window.testPendant) throw new Error('The widget did not register its pendant input handler');
     window.testPendant.dispatchEvent(new CustomEvent('use', { detail: { firstKeyCode: 0x02, jog: 0 } }));
   });
   await widgetStopped;
@@ -157,10 +158,16 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const [, stoppedState] = await stopped;
   assert.ok(Number(stoppedState.status.mpos.x) < 20, 'Stop must cancel before the jog target');
   await expect.poll(() => pendant.stopPhase).toBe('idle');
-  const idleAfterStop = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
+  const idleReplies = [];
+  const recordIdle = line => idleReplies.push(line);
+  socket.on('serialport:read', recordIdle);
   controls.stop();
-  assert.match((await idleAfterStop)[0], /^<Idle\|/, 'Stop at Idle must not put GRBL into Hold');
   await expect.poll(() => pendant.stopPhase).toBe('idle');
+  socket.off('serialport:read', recordIdle);
+  assert.ok(idleReplies.some(line => line.startsWith('<Idle|')));
+  assert.ok(idleReplies.filter(line => line.startsWith('<')).every(line => line.startsWith('<Idle|')),
+    'Stop at Idle must not put GRBL into Hold');
+  assert.ok(idleReplies.every(line => !line.startsWith('Grbl ')), 'Stop at Idle must not reset the controller');
   t.diagnostic('Stop at Idle and Jog verified');
   const running = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Run');
   const loaded = event(socket, 'gcode:load');
@@ -184,5 +191,16 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     assert.match((await afterStart)[0], /^<Idle\|/, 'Start must not resume the canceled program');
     assert.equal(workflowState, 'idle', 'Start must not restart the stopped sender');
   }
+  // GRBL reports Idle while dwelling, even though later program moves are buffered.
+  const dwellLoaded = event(socket, 'gcode:load');
+  socket.emit('command', 'SIMULATOR', 'gcode:load', 'dwell-stop.nc', 'G4 P2\nG91 G1 X10 F50');
+  await dwellLoaded;
+  const dwellSent = event(socket, 'sender:status', state => state.name === 'dwell-stop.nc' && state.sent > 0);
+  socket.emit('command', 'SIMULATOR', 'gcode:start');
+  await dwellSent;
+  const dwellReset = event(socket, 'serialport:read', line => line.startsWith('Grbl'), 3000);
+  controls.stop();
+  await dwellReset;
+  await expect.poll(() => pendant.stopPhase).toBe('idle');
   socket.disconnect();
 });

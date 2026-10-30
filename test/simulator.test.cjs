@@ -107,10 +107,65 @@ test('standalone G4 delays its ACK until preceding motion and the dwell complete
   assert.equal(lines.filter(line => line === 'ok').length, 1);
   sim.tick(1.25);
   assert.equal(sim.position[0], 1);
+  sim.input('?');
+  assert.match(lines.at(-1), /^<Idle\|/);
   assert.equal(lines.filter(line => line === 'ok').length, 1);
   sim.tick(0.25);
   assert.equal(lines.filter(line => line === 'ok').length, 2);
   assert.equal(sim.state, 'Idle');
+});
+
+test('a numbered dwell is accepted and reports Idle while waiting', () => {
+  const { sim, command, lines } = machine();
+  command('N10 G4 P0.5'); sim.input('?');
+  assert.match(lines.at(-1), /^<Idle\|/);
+  assert.equal(lines.includes('ok'), false);
+  sim.tick(0.5);
+  assert.equal(lines.at(-1), 'ok');
+});
+
+test('a full planner defers commands and acknowledgments until space is available', () => {
+  const { sim, command, lines } = machine();
+  for (let index = 0; index < 20; index++) command('G91 G1 X1 F60');
+  assert.equal(lines.filter(line => line === 'ok').length, 16);
+  assert.equal(lines.some(line => line.startsWith('error:')), false);
+  sim.tick(1);
+  assert.equal(lines.filter(line => line === 'ok').length, 17);
+  sim.tick(19);
+  assert.equal(lines.filter(line => line === 'ok').length, 20);
+  assert.equal(sim.position[0], 20);
+  assert.equal(sim.state, 'Idle');
+});
+
+test('G10 waits for queued motion and subsequent moves use the resulting work offset', () => {
+  const { sim, command, lines } = machine();
+  command('G91 G1 X2 F60'); command('G1 X3');
+  command('G10 L20 P1 X0'); command('G90 G1 X2');
+  assert.equal(lines.filter(line => line === 'ok').length, 2);
+  sim.tick(4);
+  assert.equal(sim.position[0], 4);
+  assert.equal(sim.offset[0], 0);
+  assert.equal(lines.filter(line => line === 'ok').length, 2);
+  sim.tick(1);
+  assert.equal(sim.offset[0], 5);
+  assert.equal(lines.filter(line => line === 'ok').length, 4);
+  sim.tick(2);
+  assert.equal(sim.position[0], 7);
+  assert.equal(sim.state, 'Idle');
+});
+
+test('jog cancel discards commands deferred by a full planner', () => {
+  const { sim, command, lines } = machine();
+  for (let index = 0; index < 20; index++) command('$J=G91 X1 F60');
+  sim.tick(0.5); sim.input(Buffer.from([0x85])); sim.tick(30);
+  assert.equal(sim.position[0], 0.5);
+  assert.equal(sim.state, 'Idle');
+  assert.equal(sim.pendingCommands.length, 0);
+  const ackCount = lines.filter(line => line === 'ok').length;
+  sim.tick(30);
+  assert.equal(lines.filter(line => line === 'ok').length, ackCount);
+  command('$J=G91 X1 F60'); sim.tick(1);
+  assert.equal(sim.position[0], 1.5);
 });
 
 test('dwell preserves response order and realtime hold/reset remain available', () => {

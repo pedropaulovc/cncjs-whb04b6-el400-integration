@@ -129,8 +129,9 @@ behavior with the spindle off and the tool clear. The pendant's software Reset
 and Stop do not replace a wired emergency stop. Stop cancels jogging and clears
 queued CNCjs commands. For a running program, it requests hold and waits for GRBL
 to report that motion has stopped before resetting the controller. Pendant motion
-commands stay blocked until the stop is confirmed. Stop at Idle or during jogging
-does not switch off the spindle. Follow the controller's unlock/homing procedure
+commands stay blocked until the stop is confirmed. A running or paused program is
+canceled even during a dwell, when GRBL reports Idle. With no active program,
+Stop at Idle or during jogging does not switch off the spindle. Follow the controller's unlock/homing procedure
 after a reset. Its upstream Safe-Z and W-Home
 macros assume machine Z **-5 mm**; Probe-Z assumes a **50 mm** downward search and
 defaults to a **20 mm** plate. Check those settings against the machine before
