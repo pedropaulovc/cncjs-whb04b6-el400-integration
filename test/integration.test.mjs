@@ -14,6 +14,7 @@ import { chromium, expect } from '@playwright/test';
 const require = createRequire(import.meta.url);
 const cncRequire = createRequire(require.resolve('cncjs/package.json'));
 const io = cncRequire('socket.io-client');
+const GrblRunner = cncRequire('./dist/cncjs/server/controllers/Grbl/GrblRunner.js').default;
 
 function event(socket, name, predicate = () => true, timeout = 15000) {
   return new Promise((resolve, reject) => {
@@ -23,6 +24,41 @@ function event(socket, name, predicate = () => true, timeout = 15000) {
       clearTimeout(timer); socket.off(name, listener); resolve(args);
     };
     socket.on(name, listener);
+  });
+}
+
+for (const frame of ['MPos', 'WPos']) {
+  test(`pendant preserves ${frame} completion through real CNCjs coordinate broadcasts`, async t => {
+    const installed = JSON.parse(await readFile('.runtime/install.json', 'utf8'));
+    const { CncjsSession } = await import(pathToFileURL(resolve(installed.pendant.mountPath, 'widget/cncjs-session.js')));
+    const { Grbl } = await import(pathToFileURL(resolve(installed.pendant.mountPath, 'widget/grbl.js')));
+    const listeners = new Map(), commands = [];
+    const socket = { connected: true, on: (event, handler) => listeners.set(event, handler),
+      emit: (...args) => commands.push(args), disconnect() {} };
+    const session = new CncjsSession({ io: () => socket, origin: 'http://localhost', schedule: () => 0, cancel() {} });
+    t.after(() => session.disconnect());
+    session.connect('test-token');
+    session.status = { phase: 'joined', port: 'SIMULATOR', controller: 'Grbl' };
+    session.workflowState = 'idle';
+    listeners.get('controller:settings')('Grbl', { settings: { $13: '0', $100: '250', $101: '250', $110: '3000', $111: '3000' } });
+    const grbl = new Grbl(session, () => 20, () => {}, { schedule: () => 0, cancel() {} });
+    const runner = new GrblRunner();
+    const initial = `<Idle|${frame}:0.000,0.000,0.000|WCO:10.000,0.000,0.000|FS:0,0>`;
+    runner.parse(initial);
+    // CNCjs derives both coordinate frames even when GRBL reports only one.
+    assert.equal(Number(runner.state.status.mpos.x) - Number(runner.state.status.wpos.x), 10);
+    listeners.get('controller:state')('Grbl', structuredClone(runner.state));
+    listeners.get('serialport:read')(initial);
+    assert.equal(grbl.jog('X', 0.04, 250), 'sent');
+    const completed = `<Idle|${frame}:0.040,0.000,0.000|FS:0,0>`;
+    runner.parse(completed);
+    listeners.get('serialport:read')(completed);
+    assert.equal(grbl.jogCompleted(), true, 'Raw endpoint must confirm completion');
+    listeners.get('controller:state')('Grbl', structuredClone(runner.state));
+    assert.equal(grbl.jogCompleted(), true, 'The derived coordinate frame must not invalidate completion');
+    grbl.cancelJog();
+    assert.equal(grbl.jog('Y', 0.04, 250), 'sent', 'The first input on another axis must work');
+    assert.ok(commands.every(args => args[2] !== 'jogCancel'), 'A completed move must not trigger cancellation');
   });
 }
 
