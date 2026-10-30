@@ -224,10 +224,18 @@ Unit tests exercise the GRBL protocol and simulated serial isolation. The
 integration test starts the real CNCjs server, checks widget assets, opens the
 simulator, exercises the pendant's session after G20, and checks machine/work
 coordinates through Socket.IO. It also boots both widgets in Chromium and checks
-the EL400 display after a jog. Browser tests run headlessly. Set `PW_CHANNEL=msedge`
+the EL400 display after a jog. A virtual HID receiver captures the pendant's actual
+LCD packets, including G20/G21 conversion and reconnect behavior.
+Browser tests run headlessly. Set `PW_CHANNEL=msedge`
 to use Edge locally instead of Playwright's bundled Chromium.
 CI runs setup and these tests on Windows and Linux. Hardware WebHID permission
 and physical motion still require the operator checks above.
+
+Publish pendant changes as an npm release from the parent repository before
+updating this integration. Install the chosen release with
+`npm install --save-exact cncjs-pendant-whb04b-6@<version>`, commit both package
+files, then rerun setup and the tests above. Setup serves the installed package's
+`web` directory; it does not read pendant code from a sibling checkout.
 
 ## License
 
