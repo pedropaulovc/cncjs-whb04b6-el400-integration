@@ -157,6 +157,22 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   t.after(() => browser.close());
   const page = await browser.newPage();
   await page.addInitScript(() => {
+    // Observe the widget's own socket, rather than assuming the Node client and
+    // browser have received the same controller broadcast at the same time.
+    let socketIo;
+    Object.defineProperty(window, 'io', {
+      configurable: true,
+      get: () => socketIo,
+      set: io => {
+        socketIo = new Proxy(io, {
+          apply(target, receiver, args) {
+            const socket = Reflect.apply(target, receiver, args);
+            socket.on('controller:state', (_, state) => { window.testControllerState = state; });
+            return socket;
+          },
+        });
+      },
+    });
     // Exercise the real LCD encoder and transport against a USB test double.
     const device = new EventTarget();
     Object.assign(device, {
@@ -487,6 +503,9 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     }, { firstKeyCode: 0, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0, ...detail });
   };
   const press = async (code, modifier = 0, rightDialCode = 0x0f) => {
+    const expectedParser = structuredClone(latestState.parserstate);
+    await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() => window.testControllerState?.parserstate))
+      .toEqual(expectedParser);
     await report({ firstKeyCode: code, secondKeyCode: modifier, rightDialCode });
     await report({ rightDialCode });
   };
@@ -513,7 +532,13 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   pendant.command('gcode', 'S500');
   await spindlePrepared;
   await press(0x0b, 0, 0x1b);
-  await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M3');
+  await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M3').catch(async error => {
+    t.diagnostic(JSON.stringify(await page.frame({ name: 'pendant' }).evaluate(() => ({
+      controller: window.testControllerState,
+      log: document.querySelector('#log').textContent,
+    }))));
+    throw error;
+  });
   await expect.poll(() => Number(latestState.status.spindle)).toBe(515);
   await press(0x07, 0, 0x1b);
   await expect.poll(() => latestState.status.ov?.[2]).toBe(102);
