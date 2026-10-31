@@ -174,6 +174,13 @@ defaults to a **20 mm** plate. Check those settings against the machine before
 using those buttons. The supported manual workflow here is three-axis GRBL;
 the pendant's A/B/C selectors do not add axes to a three-axis controller.
 
+FluidNC controllers also work with CNCjs's **Grbl** controller type. FluidNC's `$$`
+omits the report units and axis maximum rates the pendant needs. After joining an
+idle controller, the widget sends `$I` and then reads `$/report_inches`,
+`$/axes/{x,y,z}/steps_per_mm`, and `$/axes/{x,y,z}/max_rate_mm_per_min`. These
+read-only queries appear in the CNCjs console. Fn spindle-speed changes stay
+unavailable on FluidNC.
+
 The EL400 receives controller coordinates, not independent scale measurements.
 It therefore cannot detect missed steps, backlash, or a stalled axis. Its local
 datum/display features can differ from CNCjs's G54 work coordinates; confirm the
