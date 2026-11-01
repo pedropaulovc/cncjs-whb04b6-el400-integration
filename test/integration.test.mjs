@@ -447,13 +447,14 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await queuedDwell;
   const writeStart = writes.length;
   assert.equal(queuedJog.jog('X', 0.04, 250), 'sent');
-  assert.equal(queuedJog.jog('X', -0.04, 250), 'sent');
+  // The pendant holds later Steps until GRBL acknowledges the first.
+  assert.equal(queuedJog.jog('X', -0.04, 250), 'buffered');
   const issuedSequence = pendant.reportSequence;
   await Promise.all([
     expect.poll(() => pendant.reportSequence, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(issuedSequence + 2),
-    expect.poll(() => feederState?.queue, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(3),
+    expect.poll(() => feederState?.queue, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(2),
   ]);
-  assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Regression setup must leave both jogs queued behind the dwell');
+  assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Regression setup must leave the jog queued behind the dwell');
   assert.equal(queuedJog.jogCompleted(), false, 'Idle before queued jog acknowledgements must not complete the jog');
   const cancelWrite = event(socket, 'serialport:write', line => line.includes('\x85'));
   queuedJog.cancelJog();
@@ -466,9 +467,10 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Canceled queued jogs must never be sent');
   const completedWrites = writes.length;
   assert.equal(queuedJog.jog('X', 0.04, 250), 'sent');
-  assert.equal(queuedJog.jog('X', -0.04, 250), 'sent');
+  assert.equal(queuedJog.jog('X', -0.04, 250), 'buffered');
   await expect.poll(() => queuedJog.jogPhase).toBe('idle');
-  assert.equal(writes.slice(completedWrites).filter(line => line.startsWith('$J=')).length, 2,
+  assert.deepEqual(writes.slice(completedWrites).filter(line => line.startsWith('$J=')).map(line => line.trim()),
+    ['$J=G21 G91 X0.0400 F250.000', '$J=G21 G91 X-0.0400 F250.000'],
     'An acknowledged out-and-back pair must finish without leaving the pendant locked');
   // A widget joining an open controller cannot correlate pre-join replies.
   // Keep its cancellation armed without polling forever or deleting later MDI work.
