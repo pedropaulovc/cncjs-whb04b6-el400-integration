@@ -135,10 +135,12 @@ support mist for that function. **Start/Pause** starts, pauses, or resumes the
 CNCjs program; **Stop** cancels it. The parent pendant repository documents the
 [full mapping and configuration](https://github.com/pedropaulovc/cncjs-pendant-whb04b-6#readme).
 
-Under **Pendant settings → Macro buttons**, assign each labelled Fn combination
-to custom multiline G-code or a saved CNCjs macro, then save. Linked macros use
-the current CNCjs definition on each press. Visualizer-bound expressions and
-CNCjs's optional Run Macro event hooks require the native Macro widget.
+Open the top-level **Macro buttons** panel, choose an **Unused Fn combination**,
+and click **Add macro button**. Only configured mappings are listed. Assign custom
+multiline G-code or a saved CNCjs macro, then click **Save settings**; **Remove
+macro** deletes a mapping when saved. Linked macros use the current CNCjs
+definition on each press. Visualizer-bound expressions and CNCjs's optional Run
+Macro event hooks require the native Macro widget.
 
 ## Connect a physical GRBL machine
 
