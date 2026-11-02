@@ -112,9 +112,12 @@ selected distance per detent. Reconnecting the receiver preserves the selected m
 
 Leaving Lead returns to MPG. Step sizes are **0.001, 0.01, 0.1, 1, 5, and 10 mm**;
 the 5/10 mm settings require explicit enablement in the pendant widget. These
-replace the previous 10/50 mm mappings. The widget also configures step feed,
-spindle speed increments, and custom macros. Settings are local to the browser
-and CNCjs address.
+replace the previous 10/50 mm mappings. Step moves use the selected axis's GRBL
+maximum rate (`$110`/`$111`/`$112`), independently of program Feed %, following
+LinuxCNC's default position-mode jog-wheel behavior. **Step moves can run at full
+axis speed:** check the configured machine limits and clearance before jogging.
+The widget configures spindle speed increments and custom macros, but has no
+separate Step feed setting. Settings are local to the browser and CNCjs address.
 
 Normal jogging uses CNCjs's existing position/state updates without adding a
 stream of `client> ?` queries. Ambiguous completion and cancellation can still

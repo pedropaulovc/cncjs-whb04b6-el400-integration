@@ -291,15 +291,30 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     });
     window.testHidDevice.dispatchEvent(event);
   }, jog);
+  const stepWriteStart = writes.length;
+  const axisMaxFeed = Number(pendant.settings.settings.$110).toFixed(3);
   await startupWheel(4);
   await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10.04);
   await expect.poll(() => latestState.status.activeState).toBe('Idle');
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0400');
   assert.equal(latestState.status.ov[0], 100, 'Startup Step must not adjust feed override');
+  assert.ok(writes.slice(stepWriteStart).some(line => line.trim() === `$J=G21 G91 X0.0400 F${axisMaxFeed}`),
+    'Step speed must use the selected axis maximum, not a pendant-only feed setting');
+  const stepOverride = new Grbl(pendant);
+  t.after(() => stepOverride.clearOverrides());
+  assert.equal(stepOverride.overrideTarget('feed', 50), 'sent');
+  await expect.poll(() => latestState.status.ov[0]).toBe(50);
+  await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
+  const reducedOverrideWrites = writes.length;
   await startupWheel(-4);
   await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
   await expect.poll(() => latestState.status.activeState).toBe('Idle');
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  assert.ok(writes.slice(reducedOverrideWrites).some(line => line.trim() === `$J=G21 G91 X-0.0400 F${axisMaxFeed}`),
+    'Program Feed % must not change LinuxCNC-style Step speed');
+  assert.equal(stepOverride.overrideTarget('feed', 100), 'sent');
+  await expect.poll(() => latestState.status.ov[0]).toBe(100);
+  await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
   // INC has its own datum, but must follow the same live machine motion as ABS.
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
   await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
