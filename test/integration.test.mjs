@@ -1083,12 +1083,30 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
     for (const key of keys) await droFrame.getByTestId(`key-${key}`).click();
     await droFrame.getByTestId('key-enter').click();
   };
+  await confirmed('G20', '0.0000');
+  // G4 reports Idle, but holds later MDI work in CNCjs's feeder. Queue a
+  // conflicting unit change before requesting the preset from EL400, whose
+  // confirmed display is still G20. The preset must carry its captured units.
+  const dwellSent = event(socket, 'serialport:write', line => line.trim() === 'G4 P2');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G4 P2');
+  await dwellSent;
   const inchPresetStart = writes.length;
+  const presetSent = event(socket, 'serialport:write', line => line.includes('G10'));
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
+  assert.equal(state().parserstate.modal.units, 'G20', 'Regression setup must queue G21 behind the dwell');
   await preset(['0', 'decimal', '1']);
+  await presetSent;
   await expect.poll(() => Number(state().status.wpos.x)).toBe(2.54);
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.1000');
-  assert.equal(position()[0], 10, 'A 0.1-inch INC preset must set WPos to 2.54 mm, not move the machine');
-  assert.equal(writes.slice(inchPresetStart).filter(line => line.includes('G10')).length, 1,
+  await confirmed('G20', '0.1000');
+  assert.equal(position()[0], 10, 'A queued 0.1-inch INC preset must set WPos to 2.54 mm without motion');
+  const queuedWrites = writes.slice(inchPresetStart).map(line => line.trim());
+  const queuedUnitIndex = queuedWrites.indexOf('G21');
+  const presetIndex = queuedWrites.findIndex(line => line.includes('G10'));
+  assert.ok(queuedUnitIndex >= 0 && presetIndex > queuedUnitIndex,
+    'The conflicting G21 must reach GRBL before the EL400 preset');
+  assert.match(queuedWrites[presetIndex], /^G20\s+G10\b/,
+    'The preset must explicitly restore its captured G20 on the G10 line');
+  assert.equal(queuedWrites.filter(line => line.includes('G10')).length, 1,
     'One preset must issue one G10, without echo or duplicate conversion');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
   await confirmed('G21', '2.5400');

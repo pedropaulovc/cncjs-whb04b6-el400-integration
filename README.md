@@ -289,7 +289,8 @@ It also checks that queued +7/−1 mm jogs complete without extra status queries
 The shared server/browser fixture runs separate motion-safety and controls
 scenarios, each with its own 90-second deadline. The controls scenario checks
 EL400-to-controller and external-controller G20/G21 changes without echo,
-physical WPos/datum preservation across unit conversion, rejected busy/disconnected
+physical WPos/datum preservation across unit conversion (including a preset
+queued behind a conflicting G21 during an Idle-reporting dwell), rejected busy/disconnected
 unit requests, disabled mappings and autosaved assignment/removal across reloads,
 live macro disabling in two widgets sharing browser storage, Mode help
 interaction, and healthy/fault diagnostics visibility. Invalid live probe drafts
