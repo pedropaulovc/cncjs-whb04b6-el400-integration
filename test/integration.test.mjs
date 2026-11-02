@@ -145,12 +145,14 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const inches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
   await inches;
+  await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe('G20');
   const moved = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 5 && state.status.activeState === 'Idle');
   assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await moved;
   const zeroed = event(socket, 'controller:state', (_, state) => Number(state.status?.wpos?.x) === 0 && Number(state.status?.mpos?.x) === 5);
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X0');
   await zeroed;
+  await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe('G21');
   const rejected = await new Promise(resolve => socket.emit('open', 'COM1', { controllerType: 'Grbl', baudrate: 115200 }, resolve));
   assert.ok(rejected, 'Simulation must reject hardware even when directly requested');
 
@@ -321,6 +323,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     // CNCjs consumes routine [GC:] replies; use its native parser-state contract.
     socket.emit('command', 'SIMULATOR', 'gcode', '$G');
     await expect.poll(() => latestState.parserstate?.modal?.units).toBe(units);
+    await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe(units);
     await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
       window.testControllerState?.parserstate?.modal?.units)).toBe(units);
   };
@@ -642,6 +645,8 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const queuedDrained = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
   pendant.command('gcode', 'G21');
   await queuedDrained;
+  // Socket.IO clients receive modal broadcasts independently.
+  await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe('G21');
   assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Canceled queued jogs must never be sent');
   const completedWrites = writes.length;
   assert.equal(queuedJog.jog('X', 0.04, 250), 'sent');
@@ -656,6 +661,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   t.after(() => lateSession.disconnect());
   lateSession.connect(token);
   await expect.poll(() => lateSession.status.phase).toBe('joined');
+  await expect.poll(() => lateSession.state.parserstate?.modal?.units).toBe('G21');
   const uncertainJog = new Grbl(lateSession, undefined, message => t.diagnostic(message));
   t.after(() => uncertainJog.clearJog());
   assert.equal(uncertainJog.jog('X', 0.001, 250), 'sent');
