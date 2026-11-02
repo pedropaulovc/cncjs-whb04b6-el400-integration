@@ -282,6 +282,22 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  // CNCjs already reports progress: ordinary queued jogs must not add console
+  // status queries. Exercise the reported +7/-1 sequence against the real server.
+  const nativeJog = new Grbl(pendant);
+  t.after(() => nativeJog.clearJog());
+  const queryStart = writes.length;
+  assert.equal(nativeJog.jog('X', 7, 250), 'sent');
+  assert.equal(nativeJog.jog('X', -1, 250), 'buffered');
+  await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(16);
+  await expect.poll(() => nativeJog.jogPhase).toBe('idle');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('16.0000');
+  assert.deepEqual(writes.slice(queryStart).filter(line => line.trim() === '?'), [],
+    'Native CNCjs progress must complete a normal queued jog without pendant status polling');
+  assert.equal(nativeJog.jog('X', -6, 750), 'sent');
+  await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
+  await expect.poll(() => nativeJog.jogPhase).toBe('idle');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
   const displayInches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
   await displayInches;
