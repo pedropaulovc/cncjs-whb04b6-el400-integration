@@ -76,6 +76,10 @@ npm start
    the EL400 should follow the simulated position. Without a pendant, use
    CNCjs's jog buttons or enter `$J=G91 G21 X5 F600` in its console.
 
+The EL400's **ABS** and **INC** modes both track jogging. **Zero X/Y/Z** in INC
+sets an independent incremental datum without changing ABS. Motion continues to
+update both coordinates regardless of which mode is displayed.
+
 The pendant mount includes its entire `web` directory because the widget imports
 the driver from its parent directory. Mounting only `web/widget` breaks that import.
 CNCjs supplies its session token to embedded widgets; there is no secret to paste.

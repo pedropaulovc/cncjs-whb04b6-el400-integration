@@ -243,6 +243,25 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     100, 0, 100, 0, 0,
   ]);
+  // INC has its own datum, but must follow the same live machine motion as ABS.
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
+  const incrementalJog = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 15 && state.status.activeState === 'Idle');
+  assert.equal(new Grbl(pendant).jog('X', 5, 750), 'sent');
+  await incrementalJog;
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('15.0000');
+  // Motion in ABS must also be reflected when returning to INC.
+  const returnJog = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 10 && state.status.activeState === 'Idle');
+  assert.equal(new Grbl(pendant).jog('X', -5, 750), 'sent');
+  await returnJog;
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
   const displayInches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
   await displayInches;
