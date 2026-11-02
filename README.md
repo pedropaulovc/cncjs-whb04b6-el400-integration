@@ -110,12 +110,21 @@ selected distance per detent. Reconnecting the receiver preserves the selected m
 | Step | Move the selected distance per detent; finish the requested move after the wheel stops |
 | Continuous | Jog at the selected percentage of the axis maximum rate; cancel after 180 ms without wheel movement |
 
-Leaving Lead returns to MPG. Step sizes are **0.001, 0.01, 0.1, 1, 5, and 10 mm**;
-the 5/10 mm settings require explicit enablement in the pendant widget. These
-replace the previous 10/50 mm mappings. Step moves use the selected axis's GRBL
-maximum rate (`$110`/`$111`/`$112`), independently of program Feed %, following
-LinuxCNC's default position-mode jog-wheel behavior. **Step moves can run at full
-axis speed:** check the configured machine limits and clearance before jogging.
+Leaving Lead returns to MPG. Step selector values are **0.001, 0.01, 0.1, 1, 5,
+and 10** in the controller's current program units: **mm in G21, inches in G20**.
+For example, the 0.1 selector moves 0.1 mm in G21 and 0.1 in (2.54 mm) in G20.
+The widget shows the active units; GRBL's `$13` position-report setting and the
+EL400's independent display-unit toggle do not choose Step distances. The 5/10
+settings require explicit enablement in the pendant widget, including in inch
+mode. These replace the previous 10/50 mappings.
+
+Step moves use the selected axis's GRBL maximum rate (`$110`/`$111`/`$112`),
+independently of program Feed %, following LinuxCNC's default position-mode
+jog-wheel behavior. Jog commands express distance and feed in the current G20/G21
+units without changing the program's modal units. Continuous retains its selected
+percentage of the physical axis maximum rate in either unit mode.
+**Step moves can run at full axis speed:** check the configured machine limits
+and clearance before jogging, especially when selecting inch steps.
 The widget configures spindle speed increments and custom macros, but has no
 separate Step feed setting. Settings are local to the browser and CNCjs address.
 
@@ -251,7 +260,10 @@ simulator, exercises the pendant's session after G20, and checks machine/work
 coordinates through Socket.IO. It also boots both widgets in Chromium and checks
 the EL400 ABS and INC displays after jogging and independent zeroing. A virtual HID
 receiver exercises first-report Step jogging and captures the pendant's actual LCD
-packets, including G20/G21 conversion and reconnect behavior.
+packets, including G20/G21 conversion and reconnect behavior. The same receiver
+checks positive and negative 0.1-inch (2.54 mm) Step moves, then 0.1-mm moves after
+switching to G21. It verifies unit-aware readouts, axis-maximum wire feed despite
+50% program Feed %, and unchanged parser modal units after jogging, with `$13=0`.
 It also checks that queued +7/−1 mm jogs complete without extra status queries.
 Widget startup waits for both iframe documents (including their module scripts)
 to finish loading before starting the unchanged socket-join and HID assertions.

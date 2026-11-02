@@ -43,6 +43,7 @@ for (const frame of ['MPos', 'WPos']) {
     listeners.get('controller:settings')('Grbl', { settings: { $13: '0', $100: '250', $101: '250', $110: '3000', $111: '3000' } });
     const grbl = new Grbl(session, () => 20, () => {}, { schedule: () => 0, cancel() {} });
     const runner = new GrblRunner();
+    runner.parse('[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]');
     const initial = `<Idle|${frame}:0.000,0.000,0.000|WCO:10.000,0.000,0.000|FS:0,0>`;
     runner.parse(initial);
     // CNCjs derives both coordinate frames even when GRBL reports only one.
@@ -144,12 +145,14 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const inches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
   await inches;
+  await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe('G20');
   const moved = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 5 && state.status.activeState === 'Idle');
   assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await moved;
   const zeroed = event(socket, 'controller:state', (_, state) => Number(state.status?.wpos?.x) === 0 && Number(state.status?.mpos?.x) === 5);
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X0');
   await zeroed;
+  await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe('G21');
   const rejected = await new Promise(resolve => socket.emit('open', 'COM1', { controllerType: 'Grbl', baudrate: 115200 }, resolve));
   assert.ok(rejected, 'Simulation must reject hardware even when directly requested');
 
@@ -280,15 +283,15 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   ]);
   // A fresh pendant must jog on its first wheel report without a Step button press.
   // Use the HID boundary here so parsing and dispatch are exercised too.
-  const startupWheel = jog => page.frame({ name: 'pendant' }).evaluate(jog => {
-    const bytes = Uint8Array.of(0, 0, 0, 0x0e, 0x11, jog & 0xff, 0);
+  const startupWheel = (jog, rate = 0x0e) => page.frame({ name: 'pendant' }).evaluate(({ jog, rate }) => {
+    const bytes = Uint8Array.of(0, 0, 0, rate, 0x11, jog & 0xff, 0);
     const event = new Event('inputreport');
     Object.defineProperties(event, {
       reportId: { value: 0x04 },
       data: { value: new DataView(bytes.buffer) },
     });
     window.testHidDevice.dispatchEvent(event);
-  }, jog);
+  }, { jog, rate });
   const stepWriteStart = writes.length;
   const axisMaxFeed = Number(pendant.settings.settings.$110).toFixed(3);
   await startupWheel(4);
@@ -313,6 +316,53 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   assert.equal(stepOverride.overrideTarget('feed', 100), 'sent');
   await expect.poll(() => latestState.status.ov[0]).toBe(100);
   await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
+  // The printed .1 selector follows program units, not GRBL's $13 report units.
+  // Reuse this server and HID receiver; every phase finishes before changing units.
+  assert.equal(Number(pendant.settings.settings.$13), 0);
+  const readProgramUnits = async units => {
+    // CNCjs consumes routine [GC:] replies; use its native parser-state contract.
+    socket.emit('command', 'SIMULATOR', 'gcode', '$G');
+    await expect.poll(() => latestState.parserstate?.modal?.units).toBe(units);
+    await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe(units);
+    await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
+      window.testControllerState?.parserstate?.modal?.units)).toBe(units);
+  };
+  for (const [units, scale, label, feedResolution] of [
+    ['G20', 25.4, 'in', 0.000001], ['G21', 1, 'mm', 0.001],
+  ]) {
+    socket.emit('command', 'SIMULATOR', 'gcode', units);
+    await readProgramUnits(units);
+    await startupWheel(0, 0x0f);
+    assert.equal(stepOverride.overrideTarget('feed', 50), 'sent');
+    await expect.poll(() => latestState.status.ov[0]).toBe(50);
+    await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
+    for (const direction of [1, -1]) {
+      const unitStepStart = writes.length;
+      await startupWheel(direction, 0x0f);
+      await expect.poll(() => ({
+        x: Number(latestState.status?.mpos?.x), state: latestState.status.activeState,
+        units: latestState.parserstate?.modal?.units,
+      })).toEqual({ x: direction === 1 ? 10 + 0.1 * scale : 10, state: 'Idle', units });
+      const jogs = writes.slice(unitStepStart).map(line => line.trim()).filter(line => line.startsWith('$J='));
+      assert.equal(jogs.length, 1, 'One .1 detent must produce one completed jog');
+      const words = jogs[0].match(/^\$J=(G20|G21) G91 X(-?[\d.]+) F([\d.]+)$/);
+      assert.ok(words, `Unexpected Step command: ${jogs[0]}`);
+      assert.equal(words[1], units);
+      assert.equal(Number(words[2]), direction * 0.1);
+      const physicalFeed = Number(words[3]) * scale;
+      assert.ok(physicalFeed <= Number(axisMaxFeed) && Number(axisMaxFeed) - physicalFeed < feedResolution * scale,
+        `Step must use the axis maximum in ${label}/min despite 50% program feed: ${jogs[0]}`);
+      assert.equal(latestState.status.ov[0], 50);
+    }
+    await expect(pendantFrame.locator('#mode')).toHaveText(`step (${label})`);
+    await expect(pendantFrame.locator('#rd')).toHaveText(`0.1 ${label}`);
+    await readProgramUnits(units);
+  }
+  await startupWheel(0);
+  assert.equal(stepOverride.overrideTarget('feed', 100), 'sent');
+  await expect.poll(() => latestState.status.ov[0]).toBe(100);
+  await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
   // INC has its own datum, but must follow the same live machine motion as ABS.
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
   await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
@@ -595,6 +645,8 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const queuedDrained = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
   pendant.command('gcode', 'G21');
   await queuedDrained;
+  // Socket.IO clients receive modal broadcasts independently.
+  await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe('G21');
   assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Canceled queued jogs must never be sent');
   const completedWrites = writes.length;
   assert.equal(queuedJog.jog('X', 0.04, 250), 'sent');
@@ -609,6 +661,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   t.after(() => lateSession.disconnect());
   lateSession.connect(token);
   await expect.poll(() => lateSession.status.phase).toBe('joined');
+  await expect.poll(() => lateSession.state.parserstate?.modal?.units).toBe('G21');
   const uncertainJog = new Grbl(lateSession, undefined, message => t.diagnostic(message));
   t.after(() => uncertainJog.clearJog());
   assert.equal(uncertainJog.jog('X', 0.001, 250), 'sent');
