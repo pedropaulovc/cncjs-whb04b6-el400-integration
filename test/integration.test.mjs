@@ -837,9 +837,27 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(0);
   const unusedMacroButton = pendantFrame.getByRole('combobox', { name: 'Unused Fn combination', exact: true });
   await expect(unusedMacroButton.locator('option[value="1"]')).toHaveCount(1);
-  assert.deepEqual(await unusedMacroButton.locator('option').evaluateAll(options =>
-    options.filter(option => option.value).map(option => Number(option.value))), [1, 2, 5, 6, 7, 9, 11, 12, 13, 14],
-  'Human-readable macro labels must preserve existing noncontiguous stored identifiers');
+  await unusedMacroButton.selectOption('14');
+  await pendantFrame.getByRole('button', { name: 'Add macro button', exact: true }).click();
+  const printedMacro10 = pendantFrame.getByRole('combobox', { name: 'Assignment for Macro-10 (Fn+Macro-10)', exact: true });
+  await printedMacro10.selectOption('custom');
+  const macro10Code = pendantFrame.getByRole('textbox', { name: 'G-code for Macro-10 (Fn+Macro-10)', exact: true });
+  await macro10Code.fill('G20');
+  await expect.poll(storedMacros).toEqual({ 14: 'G20' });
+  await reloadPendant();
+  await expect(macro10Code).toHaveValue('G20');
+  const macro10Start = writes.length;
+  await macroButton(0x10, 0x0c);
+  await expect.poll(() => state().parserstate?.modal?.units).toBe('G20');
+  await expect.poll(() => writes.slice(macro10Start).map(line => line.trim()).filter(line => /^(G20|G21)$/.test(line)))
+    .toEqual(['G20']);
+  await macro10Code.fill('G21');
+  await macroButton(0x10, 0x0c);
+  await expect.poll(() => state().parserstate?.modal?.units).toBe('G21');
+  await pendantFrame.getByRole('button', { name: 'Remove macro for Macro-10 (Fn+Macro-10)', exact: true }).click();
+  await expect.poll(storedMacros).toEqual({});
+  await reloadPendant();
+  await expect(printedMacro10).toHaveCount(0);
   await unusedMacroButton.selectOption('1');
   await pendantFrame.getByRole('button', { name: 'Add macro button', exact: true }).click();
   await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(1);
