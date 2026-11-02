@@ -630,12 +630,20 @@ async function withRealWidgets(t, scenario) {
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await pendantFrame.locator('#thickness').fill('12.5');
   await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
-  await pendantFrame.locator('#thickness').fill('');
-  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'error');
-  assert.equal(await page.frame({ name: 'pendant' }).evaluate(() =>
-    JSON.parse(localStorage.getItem('whb04b-controls')).probeThickness), 12.5,
-  'A blank probe draft must preserve the last valid physical thickness');
-  assert.deepEqual(getPosition(), stationary, 'Editing settings must not move the machine');
+  for (const invalid of ['', '-1']) {
+    await pendantFrame.locator('#thickness').fill(invalid);
+    await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'error');
+    await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
+    const probeStart = writes.length;
+    await press(0x0d);
+    await expect(pendantFrame.locator('#log')).toContainText('Enter a valid nonnegative probe plate thickness.');
+    assert.deepEqual(getPosition(), stationary, 'An invalid probe draft must not start a probe');
+    assert.ok(writes.slice(probeStart).every(line => !/\bG38(?:\.\d+)?\b/.test(line)),
+      'An invalid live draft must not probe with the previous saved thickness');
+    assert.equal(await page.frame({ name: 'pendant' }).evaluate(() =>
+      JSON.parse(localStorage.getItem('whb04b-controls')).probeThickness), 12.5,
+    'An invalid probe draft must preserve the last valid saved thickness');
+  }
   // Leaving Lead selects MPG; startup now selects Step instead.
   await report({ rightDialCode: 0x9b });
   await report({ rightDialCode: 0x1b });
@@ -765,7 +773,7 @@ test('real CNCjs autosaved controls and bidirectional display units', { timeout:
 
 async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, savedMacro,
   base, browserErrors, state }) {
-  const macroButton = (key, modifier = 0) => page.frame({ name: 'pendant' }).evaluate(({ key, modifier }) => {
+  const macroButton = (key, modifier = 0, frameName = 'pendant') => page.frame({ name: frameName }).evaluate(({ key, modifier }) => {
     for (const pressed of [key, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
       detail: { firstKeyCode: pressed ? modifier || key : 0, secondKeyCode: pressed && modifier ? key : 0,
         leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
@@ -855,6 +863,39 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   await pendantFrame.getByText('Default button reference', { exact: true }).click();
   await expect(pendantFrame.locator('#buttonReference input, #buttonReference select, #buttonReference textarea')).toHaveCount(0);
   await pendantFrame.getByText('Default button reference', { exact: true }).click();
+  // Both mounted widgets start with the same linked mapping. Disabling it in
+  // the second must update that widget's live controls even though the first
+  // has already written the identical serialization to shared localStorage.
+  await page.evaluate(() => {
+    const frame = document.createElement('iframe');
+    frame.name = 'pendant-peer';
+    frame.style.cssText = 'display:block;width:1100px;height:800px;border:0';
+    frame.src = document.querySelector('iframe[name="pendant"]').src;
+    document.body.append(frame);
+  });
+  const peerFrame = page.frameLocator('iframe[name="pendant-peer"]');
+  try {
+    await expect(peerFrame.locator('#sockPill')).toHaveText('joined');
+    await expect.poll(() => page.frame({ name: 'pendant-peer' }).evaluate(() => Boolean(window.testPendant))).toBe(true);
+    await peerFrame.getByText('Macro buttons', { exact: true }).click();
+    const peerAssignment = peerFrame.getByRole('combobox', { name: 'Assignment for Macro-1 (Fn+Feed+)', exact: true });
+    await expect(peerAssignment).toHaveValue(`cncjs:${savedMacro.id}`);
+    await assignment.selectOption('disabled');
+    await expect.poll(storedMacros).toEqual({ 1: { source: 'disabled' } });
+    await peerAssignment.selectOption('disabled');
+    const sharedDisabledStart = writes.length;
+    for (const [frameName, frame] of [['pendant', pendantFrame], ['pendant-peer', peerFrame]]) {
+      await frame.locator('#log').evaluate(element => { element.textContent = ''; });
+      await macroButton(0x04, 0x0c, frameName);
+      await expect(frame.locator('#log')).toContainText('Macro-1 (Fn+Feed+) is disabled.');
+    }
+    assert.deepEqual(writes.slice(sharedDisabledStart).map(line => line.trim())
+      .filter(line => !['$G', '$$', '?'].includes(line)), [],
+    'Both widgets must stop executing a macro when the same disabled config is saved twice');
+    await assignment.selectOption(`cncjs:${savedMacro.id}`);
+  } finally {
+    await page.locator('iframe[name="pendant-peer"]').evaluate(frame => frame.remove());
+  }
   await macroButton(0x04, 0x0c);
   await expect.poll(() => state().parserstate?.modal?.units).toBe('G20');
   await macroApi(`/${savedMacro.id}`, 'PUT', { name: 'Updated units', content: '%units=21\nG[units]' });

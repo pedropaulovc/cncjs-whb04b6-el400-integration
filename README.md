@@ -139,7 +139,8 @@ The widget configures spindle speed increments and custom macros, but has no
 separate Step feed setting. Settings are local to the browser and CNCjs address.
 Probe plate thickness also saves automatically in millimetres (zero is allowed).
 Invalid or empty drafts show a settings error and preserve the last valid saved
-settings; Probe-Z uses the saved thickness rather than an invalid draft.
+settings. Probe-Z validates the current live thickness field and refuses a blank
+or negative draft; it never silently substitutes the previous saved thickness.
 
 Normal jogging uses CNCjs's existing position/state updates without adding a
 stream of `client> ?` queries. Ambiguous completion and cancellation can still
@@ -290,7 +291,9 @@ scenarios, each with its own 90-second deadline. The controls scenario checks
 EL400-to-controller and external-controller G20/G21 changes without echo,
 physical WPos/datum preservation across unit conversion, rejected busy/disconnected
 unit requests, disabled mappings and autosaved assignment/removal across reloads,
-Mode help interaction, and healthy/fault diagnostics visibility.
+live macro disabling in two widgets sharing browser storage, Mode help
+interaction, and healthy/fault diagnostics visibility. Invalid live probe drafts
+must refuse probing without overwriting the last valid saved thickness.
 Widget startup waits for both iframe documents (including their module scripts)
 to finish loading before starting the unchanged socket-join and HID assertions.
 Startup failures report iframe readiness, boot/socket state, widget logs, and
