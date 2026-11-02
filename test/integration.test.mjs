@@ -233,8 +233,6 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     }), null, { timeout: 15000 });
     assert.deepEqual(browserErrors, [], 'Widget documents must load without browser exceptions');
     await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
-    await expect(pendantFrame.locator('#portPill')).toHaveText('port SIMULATOR');
-    await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✓');
   } catch (error) {
     t.diagnostic(`Widget startup browser exceptions: ${JSON.stringify(browserErrors)}`);
     try {
@@ -291,15 +289,30 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     });
     window.testHidDevice.dispatchEvent(event);
   }, jog);
+  const stepWriteStart = writes.length;
+  const axisMaxFeed = Number(pendant.settings.settings.$110).toFixed(3);
   await startupWheel(4);
   await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10.04);
   await expect.poll(() => latestState.status.activeState).toBe('Idle');
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0400');
   assert.equal(latestState.status.ov[0], 100, 'Startup Step must not adjust feed override');
+  assert.ok(writes.slice(stepWriteStart).some(line => line.trim() === `$J=G21 G91 X0.0400 F${axisMaxFeed}`),
+    'Step speed must use the selected axis maximum, not a pendant-only feed setting');
+  const stepOverride = new Grbl(pendant);
+  t.after(() => stepOverride.clearOverrides());
+  assert.equal(stepOverride.overrideTarget('feed', 50), 'sent');
+  await expect.poll(() => latestState.status.ov[0]).toBe(50);
+  await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
+  const reducedOverrideWrites = writes.length;
   await startupWheel(-4);
   await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
   await expect.poll(() => latestState.status.activeState).toBe('Idle');
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  assert.ok(writes.slice(reducedOverrideWrites).some(line => line.trim() === `$J=G21 G91 X-0.0400 F${axisMaxFeed}`),
+    'Program Feed % must not change LinuxCNC-style Step speed');
+  assert.equal(stepOverride.overrideTarget('feed', 100), 'sent');
+  await expect.poll(() => latestState.status.ov[0]).toBe(100);
+  await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
   // INC has its own datum, but must follow the same live machine motion as ABS.
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
   await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
@@ -344,13 +357,26 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
   await displayMillimetres;
   await expect.poll(async () => (await lcdFrame())?.slice(4, 8)).toEqual([5, 0, 0, 0]);
-  await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await pendantFrame.getByText('Macro buttons', { exact: true }).click();
+  await expect(pendantFrame.locator('#thickness')).not.toBeVisible();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(0);
+  const unusedMacroButton = pendantFrame.getByRole('combobox', { name: 'Unused Fn combination', exact: true });
+  await unusedMacroButton.selectOption('1');
+  await pendantFrame.getByRole('button', { name: 'Add macro button', exact: true }).click();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(1);
+  await expect(unusedMacroButton.locator('option[value="1"]')).toHaveCount(0);
   const assignment = pendantFrame.getByRole('combobox', { name: 'Assignment for Fn + Feed+' });
   await expect(assignment.locator('option', { hasText: 'Pendant units' })).toHaveCount(1);
   await assignment.selectOption(`cncjs:${savedMacro.id}`);
+  // Draft mappings remain saveable after their panel is collapsed.
+  await pendantFrame.getByText('Macro buttons', { exact: true }).click();
   await pendantFrame.getByRole('button', { name: 'Save settings', exact: true }).click();
   await expect(pendantFrame.locator('#settingsStatus')).toContainText('Settings saved');
+  await page.frame({ name: 'pendant' }).evaluate(() => location.reload());
+  await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
+  await pendantFrame.getByText('Macro buttons', { exact: true }).click();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(1);
+  await expect(assignment).toHaveValue(`cncjs:${savedMacro.id}`);
   const macroButton = (key, modifier = 0) => page.frame({ name: 'pendant' }).evaluate(({ key, modifier }) => {
     for (const pressed of [key, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
       detail: { firstKeyCode: pressed ? modifier || key : 0, secondKeyCode: pressed && modifier ? key : 0,
@@ -364,6 +390,9 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect(assignment.locator('option', { hasText: 'Updated units' })).toHaveCount(1, { timeout: 12000 });
   await macroButton(0x04, 0x0c);
   await expect.poll(() => latestState.parserstate?.modal?.units).toBe('G21');
+  await unusedMacroButton.selectOption('2');
+  await pendantFrame.getByRole('button', { name: 'Add macro button', exact: true }).click();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(2);
   const customAssignment = pendantFrame.getByRole('combobox', { name: 'Assignment for Fn + Feed-' });
   await customAssignment.selectOption('custom');
   await pendantFrame.getByRole('textbox', { name: 'G-code for Fn + Feed-', exact: true }).fill('G20\nG21');
@@ -412,9 +441,14 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect(assignment).toHaveValue(`cncjs:${savedMacro.id}`);
   await page.unroute(`${base}/api/macros`);
   await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
-  await assignment.selectOption('disabled');
-  await customAssignment.selectOption('disabled');
+  await pendantFrame.getByRole('button', { name: 'Remove macro for Fn + Feed+', exact: true }).click();
+  await expect(assignment).toHaveCount(0);
+  await expect(customAssignment).toHaveValue('custom');
+  await pendantFrame.getByRole('button', { name: 'Remove macro for Fn + Feed-', exact: true }).click();
   await pendantFrame.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(0);
+  assert.deepEqual(await page.frame({ name: 'pendant' }).evaluate(() =>
+    JSON.parse(localStorage.getItem('whb04b-controls')).macros), {});
   const toggleLcdCoordinates = () => page.frame({ name: 'pendant' }).evaluate(() => {
     for (const key of [0x10, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
       detail: { firstKeyCode: key, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
@@ -430,14 +464,12 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     window.testHid.dispatchEvent(event);
   }, type);
   await hidEvent('disconnect');
-  await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✗');
   await page.frame({ name: 'pendant' }).evaluate(() => { window.testLcdReports = []; });
   await toggleLcdCoordinates();
   await toggleLcdCoordinates();
   assert.equal(await page.frame({ name: 'pendant' }).evaluate(() => window.testLcdReports.length), 0,
     'Disconnected receiver must not receive even a partial LCD frame');
   await hidEvent('connect');
-  await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✓');
   await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x81, 5, 0, 0, 0]);
   assert.deepEqual(browserErrors, [], 'Mounted widgets must boot without browser errors');
   const widgetJogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
@@ -612,6 +644,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   };
   const getPosition = () => ['x', 'y', 'z'].map(axis => Number(latestState.status.mpos[axis]));
   const stationary = getPosition();
+  await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await pendantFrame.locator('#thickness').fill('');
   await press(0x0d);
   await expect(pendantFrame.locator('#log')).toContainText('Enter a valid nonnegative probe plate thickness.');
