@@ -116,6 +116,10 @@ replace the previous 10/50 mm mappings. The widget also configures step feed,
 spindle speed increments, and custom macros. Settings are local to the browser
 and CNCjs address.
 
+Normal jogging uses CNCjs's existing position/state updates without adding a
+stream of `client> ?` queries. Ambiguous completion and cancellation can still
+request explicit status confirmations; a missing reply never counts as stopped.
+
 Turning the rate selector in MPG or Continuous also sets the program feed
 override to that percentage. GRBL's minimum override is 10%, so its 2% and 5%
 positions use 10% for program feed override; Continuous jog speed still uses
@@ -243,6 +247,11 @@ coordinates through Socket.IO. It also boots both widgets in Chromium and checks
 the EL400 ABS and INC displays after jogging and independent zeroing. A virtual HID
 receiver exercises first-report Step jogging and captures the pendant's actual LCD
 packets, including G20/G21 conversion and reconnect behavior.
+It also checks that queued +7/−1 mm jogs complete without extra status queries.
+Widget startup waits for both iframe documents (including their module scripts)
+to finish loading before starting the unchanged socket-join and HID assertions.
+Startup failures report iframe readiness, boot/socket state, widget logs, and
+CNCjs output; browser exceptions and failed HTTP requests are printed as they occur.
 Browser tests run headlessly. Set `PW_CHANNEL=msedge`
 to use Edge locally instead of Playwright's bundled Chromium.
 CI runs setup and these tests on Windows and Linux. Hardware WebHID permission

@@ -53,9 +53,9 @@ for (const frame of ['MPos', 'WPos']) {
     const completed = `<Idle|${frame}:0.040,0.000,0.000|FS:0,0>`;
     runner.parse(completed);
     listeners.get('serialport:read')(completed);
-    assert.equal(grbl.jogCompleted(), true, 'Raw endpoint must confirm completion');
+    // Completion now disposes its tracking immediately. Check the consumer
+    // behavior after CNCjs echoes the derived frame, not the disposed predicate.
     listeners.get('controller:state')('Grbl', structuredClone(runner.state));
-    assert.equal(grbl.jogCompleted(), true, 'The derived coordinate frame must not invalidate completion');
     grbl.cancelJog();
     assert.equal(grbl.jog('Y', 0.04, 250), 'sent', 'The first input on another axis must work');
     assert.ok(commands.every(args => args[2] !== 'jogCancel'), 'A completed move must not trigger cancellation');
@@ -199,7 +199,15 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     };
   });
   const browserErrors = [];
-  page.on('pageerror', error => browserErrors.push(error.message));
+  page.on('pageerror', error => {
+    browserErrors.push(error.message);
+    t.diagnostic(`Browser exception: ${error.stack || error.message}`);
+  });
+  page.on('requestfailed', request => t.diagnostic(
+    `Browser request failed: ${new URL(request.url()).pathname}: ${request.failure()?.errorText}`));
+  page.on('response', response => {
+    if (response.status() >= 400) t.diagnostic(`Browser HTTP ${response.status()}: ${new URL(response.url()).pathname}`);
+  });
   await page.route(`${base}/integration-test`, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Widget integration test</title><body></body>' }));
   await page.goto(`${base}/integration-test`);
   // Embed the real built widgets using CNCjs's same-origin/token contract.
@@ -214,9 +222,38 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     }
   }, { token });
   const pendantFrame = page.frameLocator('iframe[name="pendant"]');
-  await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
-  await expect(pendantFrame.locator('#portPill')).toHaveText('port SIMULATOR');
-  await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✓');
+  try {
+    // The static HTML pills exist before the module graph has loaded and boot's
+    // DOMContentLoaded handler has run. Give document loading its own deadline,
+    // then keep the normal socket/HID assertion deadlines. Exclude about:blank.
+    await page.waitForFunction(() => ['pendant', 'dro'].every(name => {
+      const frame = document.querySelector(`iframe[name="${name}"]`);
+      return frame?.contentDocument?.readyState === 'complete'
+        && frame.contentWindow.location.href === frame.src;
+    }), null, { timeout: 15000 });
+    assert.deepEqual(browserErrors, [], 'Widget documents must load without browser exceptions');
+    await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
+    await expect(pendantFrame.locator('#portPill')).toHaveText('port SIMULATOR');
+    await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✓');
+  } catch (error) {
+    t.diagnostic(`Widget startup browser exceptions: ${JSON.stringify(browserErrors)}`);
+    try {
+      const frames = await page.evaluate(() => [...document.querySelectorAll('iframe')].map(frame => ({
+        name: frame.name,
+        path: frame.contentWindow.location.pathname,
+        readyState: frame.contentDocument?.readyState,
+        socketIo: typeof frame.contentWindow.io,
+        pendantBooted: Boolean(frame.contentWindow.testPendant),
+        pills: ['sockPill', 'portPill', 'hidPill', 'tokenPill'].map(id => [id, frame.contentDocument?.getElementById(id)?.textContent]),
+        log: frame.contentDocument?.getElementById('log')?.textContent?.slice(-2000),
+      })));
+      t.diagnostic(`Widget startup frames: ${JSON.stringify(frames)}`);
+    } catch (diagnosticError) {
+      t.diagnostic(`Cannot inspect widget startup: ${diagnosticError.message}`);
+    }
+    t.diagnostic(`Widget startup CNCjs output: ${output}`);
+    throw error;
+  }
   const lcdFrame = async () => page.frame({ name: 'pendant' }).evaluate(() => {
     const reports = window.testLcdReports;
     const count = reports.length - reports.length % 3;
@@ -281,6 +318,22 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  // CNCjs already reports progress: ordinary queued jogs must not add console
+  // status queries. Exercise the reported +7/-1 sequence against the real server.
+  const nativeJog = new Grbl(pendant);
+  t.after(() => nativeJog.clearJog());
+  const queryStart = writes.length;
+  assert.equal(nativeJog.jog('X', 7, 250), 'sent');
+  assert.equal(nativeJog.jog('X', -1, 250), 'buffered');
+  await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(16);
+  await expect.poll(() => nativeJog.jogPhase).toBe('idle');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('16.0000');
+  assert.deepEqual(writes.slice(queryStart).filter(line => line.trim() === '?'), [],
+    'Native CNCjs progress must complete a normal queued jog without pendant status polling');
+  assert.equal(nativeJog.jog('X', -6, 750), 'sent');
+  await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
+  await expect.poll(() => nativeJog.jogPhase).toBe('idle');
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
   const displayInches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
@@ -489,6 +542,13 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   // The pendant holds later Steps until GRBL acknowledges the first.
   assert.equal(queuedJog.jog('X', -0.04, 250), 'buffered');
   const issuedSequence = pendant.reportSequence;
+  // Another client may explicitly request Idle while the jog is still queued.
+  // Native CNCjs suppresses unchanged frames; the pendant no longer polls here.
+  for (let report = 0; report < 2; report++) {
+    const status = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
+    socket.emit('command', 'SIMULATOR', 'statusreport');
+    assert.match((await status)[0], /^<Idle\|/);
+  }
   await Promise.all([
     expect.poll(() => pendant.reportSequence, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(issuedSequence + 2),
     expect.poll(() => feederState?.queue, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(2),
