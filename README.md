@@ -76,9 +76,19 @@ npm start
    the EL400 should follow the simulated position. Without a pendant, use
    CNCjs's jog buttons or enter `$J=G91 G21 X5 F600` in its console.
 
-The EL400's **ABS** and **INC** modes both track jogging. **Zero X/Y/Z** in INC
-sets an independent incremental datum without changing ABS. Motion continues to
-update both coordinates regardless of which mode is displayed.
+The EL400's **ABS** and **INC** modes both track jogging. In CNCjs mode, ABS
+shows machine position (**MPos**) and INC shows the controller's work position
+(**WPos**). **Zero X/Y/Z** or an INC preset requests a **G10** work-offset
+change, not motion: MPos stays unchanged and CNCjs and EL400 show the confirmed
+WPos. External work-offset changes also update INC. Standalone EL400 use retains
+its independent incremental datum.
+
+In CNCjs mode the controller's native **G20/G21** state also owns the EL400 unit
+display. EL400's unit button requests G20 or G21; it changes the display only
+after controller confirmation. Unit changes made in CNCjs or by a macro update
+both widgets without being echoed back. Changing units does not move the machine
+or reset the physical ABS/INC datum. Requests are rejected while disconnected or
+busy. Standalone EL400 use keeps its local display-only unit toggle.
 
 The pendant mount includes its entire `web` directory because the widget imports
 the driver from its parent directory. Mounting only `web/widget` breaks that import.
@@ -113,10 +123,10 @@ selected distance per detent. Reconnecting the receiver preserves the selected m
 Leaving Lead returns to MPG. Step selector values are **0.001, 0.01, 0.1, 1, 5,
 and 10** in the controller's current program units: **mm in G21, inches in G20**.
 For example, the 0.1 selector moves 0.1 mm in G21 and 0.1 in (2.54 mm) in G20.
-The widget shows the active units; GRBL's `$13` position-report setting and the
-EL400's independent display-unit toggle do not choose Step distances. The 5/10
-settings require explicit enablement in the pendant widget, including in inch
-mode. These replace the previous 10/50 mappings.
+The widget shows the active units; GRBL's `$13` position-report setting does not
+choose Step distances. EL400 follows the same confirmed program units in CNCjs
+mode. The 5/10 settings require explicit enablement in the pendant widget,
+including in inch mode. These replace the previous 10/50 mappings.
 
 Step moves use the selected axis's GRBL maximum rate (`$110`/`$111`/`$112`),
 independently of program Feed %, following LinuxCNC's default position-mode
@@ -144,12 +154,19 @@ support mist for that function. **Start/Pause** starts, pauses, or resumes the
 CNCjs program; **Stop** cancels it. The parent pendant repository documents the
 [full mapping and configuration](https://github.com/pedropaulovc/cncjs-pendant-whb04b-6#readme).
 
-Open the top-level **Macro buttons** panel, choose an **Unused Fn combination**,
-and click **Add macro button**. Only configured mappings are listed. Assign custom
-multiline G-code or a saved CNCjs macro, then click **Save settings**; **Remove
-macro** deletes a mapping when saved. Linked macros use the current CNCjs
-definition on each press. Visualizer-bound expressions and CNCjs's optional Run
-Macro event hooks require the native Macro widget.
+Open the top-level **Macro buttons** panel, choose an unused numbered Macro/Fn
+combination, and click **Add macro button**. New mappings are **Disabled** and
+cannot execute until assigned. Assign custom multiline G-code or a saved CNCjs
+macro; valid settings save automatically, including assignment changes and
+removal. Only configured mappings are listed, and their identifiers survive a
+reload. Linked macros use the current CNCjs definition on each press.
+Visualizer-bound expressions and CNCjs's optional Run Macro event hooks require
+the native Macro widget.
+
+The **Mode** information control provides help on hover, click, or keyboard
+focus. The read-only default-button reference is separate from editable macro
+assignments. Healthy token, socket, and port badges stay hidden; pendant readiness
+and connection faults remain visible. **Reconnect** is inside **Diagnostics**.
 
 ## Connect a physical GRBL machine
 
@@ -258,13 +275,19 @@ Unit tests exercise the GRBL protocol and simulated serial isolation. The
 integration test starts the real CNCjs server, checks widget assets, opens the
 simulator, exercises the pendant's session after G20, and checks machine/work
 coordinates through Socket.IO. It also boots both widgets in Chromium and checks
-the EL400 ABS and INC displays after jogging and independent zeroing. A virtual HID
+the EL400 ABS and controller-owned INC displays after jogging and work-offset changes. A virtual HID
 receiver exercises first-report Step jogging and captures the pendant's actual LCD
 packets, including G20/G21 conversion and reconnect behavior. The same receiver
 checks positive and negative 0.1-inch (2.54 mm) Step moves, then 0.1-mm moves after
 switching to G21. It verifies unit-aware readouts, axis-maximum wire feed despite
 50% program Feed %, and unchanged parser modal units after jogging, with `$13=0`.
 It also checks that queued +7/−1 mm jogs complete without extra status queries.
+The shared server/browser fixture runs separate motion-safety and controls
+scenarios, each with its own 90-second deadline. The controls scenario checks
+EL400-to-controller and external-controller G20/G21 changes without echo,
+physical WPos/datum preservation across unit conversion, rejected busy/disconnected
+unit requests, disabled mappings and autosaved assignment/removal across reloads,
+Mode help interaction, and healthy/fault diagnostics visibility.
 Widget startup waits for both iframe documents (including their module scripts)
 to finish loading before starting the unchanged socket-join and HID assertions.
 Startup failures report iframe readiness, boot/socket state, widget logs, and
