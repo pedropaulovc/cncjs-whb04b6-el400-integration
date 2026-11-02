@@ -628,10 +628,14 @@ async function withRealWidgets(t, scenario) {
   const getPosition = () => ['x', 'y', 'z'].map(axis => Number(latestState.status.mpos[axis]));
   const stationary = getPosition();
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
+  await pendantFrame.locator('#thickness').fill('12.5');
+  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
   await pendantFrame.locator('#thickness').fill('');
-  await press(0x0d);
-  await expect(pendantFrame.locator('#log')).toContainText('Enter a valid nonnegative probe plate thickness.');
-  assert.deepEqual(getPosition(), stationary, 'A blank probe thickness must not start a probe');
+  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'error');
+  assert.equal(await page.frame({ name: 'pendant' }).evaluate(() =>
+    JSON.parse(localStorage.getItem('whb04b-controls')).probeThickness), 12.5,
+  'A blank probe draft must preserve the last valid physical thickness');
+  assert.deepEqual(getPosition(), stationary, 'Editing settings must not move the machine');
   // Leaving Lead selects MPG; startup now selects Step instead.
   await report({ rightDialCode: 0x9b });
   await report({ rightDialCode: 0x1b });
@@ -796,6 +800,7 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   await pendantFrame.getByText('Diagnostics', { exact: true }).click();
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await pendantFrame.locator('#spindleIncrement').fill('125');
+  await pendantFrame.locator('#thickness').fill('12.5');
   await pendantFrame.locator('#largeSteps').selectOption('enabled');
   await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
   await page.frame({ name: 'pendant' }).evaluate(() => location.reload());
@@ -803,6 +808,20 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await expect(pendantFrame.locator('#spindleIncrement')).toHaveValue('125');
   await expect(pendantFrame.locator('#largeSteps')).toHaveValue('enabled');
+  await expect(pendantFrame.locator('#thickness')).toHaveValue('12.5');
+  const validSettings = await page.frame({ name: 'pendant' }).evaluate(() => localStorage.getItem('whb04b-controls'));
+  for (const invalid of ['', '-1']) {
+    await pendantFrame.locator('#thickness').fill(invalid);
+    await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'error');
+    assert.equal(await page.frame({ name: 'pendant' }).evaluate(() => localStorage.getItem('whb04b-controls')),
+      validSettings, 'Invalid thickness must not replace any saved settings');
+  }
+  await pendantFrame.locator('#thickness').fill('0');
+  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
+  await page.frame({ name: 'pendant' }).evaluate(() => location.reload());
+  await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
+  await pendantFrame.getByText('Pendant settings', { exact: true }).click();
+  await expect(pendantFrame.locator('#thickness')).toHaveValue('0');
   await pendantFrame.locator('#largeSteps').selectOption('disabled');
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await pendantFrame.getByText('Macro buttons', { exact: true }).click();

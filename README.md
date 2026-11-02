@@ -137,6 +137,9 @@ percentage of the physical axis maximum rate in either unit mode.
 and clearance before jogging, especially when selecting inch steps.
 The widget configures spindle speed increments and custom macros, but has no
 separate Step feed setting. Settings are local to the browser and CNCjs address.
+Probe plate thickness also saves automatically in millimetres (zero is allowed).
+Invalid or empty drafts show a settings error and preserve the last valid saved
+settings; Probe-Z uses the saved thickness rather than an invalid draft.
 
 Normal jogging uses CNCjs's existing position/state updates without adding a
 stream of `client> ?` queries. Ambiguous completion and cancellation can still
