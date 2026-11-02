@@ -199,7 +199,15 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     };
   });
   const browserErrors = [];
-  page.on('pageerror', error => browserErrors.push(error.message));
+  page.on('pageerror', error => {
+    browserErrors.push(error.message);
+    t.diagnostic(`Browser exception: ${error.stack || error.message}`);
+  });
+  page.on('requestfailed', request => t.diagnostic(
+    `Browser request failed: ${new URL(request.url()).pathname}: ${request.failure()?.errorText}`));
+  page.on('response', response => {
+    if (response.status() >= 400) t.diagnostic(`Browser HTTP ${response.status()}: ${new URL(response.url()).pathname}`);
+  });
   await page.route(`${base}/integration-test`, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Widget integration test</title><body></body>' }));
   await page.goto(`${base}/integration-test`);
   // Embed the real built widgets using CNCjs's same-origin/token contract.
@@ -214,9 +222,38 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     }
   }, { token });
   const pendantFrame = page.frameLocator('iframe[name="pendant"]');
-  await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
-  await expect(pendantFrame.locator('#portPill')).toHaveText('port SIMULATOR');
-  await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✓');
+  try {
+    // The static HTML pills exist before the module graph has loaded and boot's
+    // DOMContentLoaded handler has run. Give document loading its own deadline,
+    // then keep the normal socket/HID assertion deadlines. Exclude about:blank.
+    await page.waitForFunction(() => ['pendant', 'dro'].every(name => {
+      const frame = document.querySelector(`iframe[name="${name}"]`);
+      return frame?.contentDocument?.readyState === 'complete'
+        && frame.contentWindow.location.href === frame.src;
+    }), null, { timeout: 15000 });
+    assert.deepEqual(browserErrors, [], 'Widget documents must load without browser exceptions');
+    await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
+    await expect(pendantFrame.locator('#portPill')).toHaveText('port SIMULATOR');
+    await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✓');
+  } catch (error) {
+    t.diagnostic(`Widget startup browser exceptions: ${JSON.stringify(browserErrors)}`);
+    try {
+      const frames = await page.evaluate(() => [...document.querySelectorAll('iframe')].map(frame => ({
+        name: frame.name,
+        path: frame.contentWindow.location.pathname,
+        readyState: frame.contentDocument?.readyState,
+        socketIo: typeof frame.contentWindow.io,
+        pendantBooted: Boolean(frame.contentWindow.testPendant),
+        pills: ['sockPill', 'portPill', 'hidPill', 'tokenPill'].map(id => [id, frame.contentDocument?.getElementById(id)?.textContent]),
+        log: frame.contentDocument?.getElementById('log')?.textContent?.slice(-2000),
+      })));
+      t.diagnostic(`Widget startup frames: ${JSON.stringify(frames)}`);
+    } catch (diagnosticError) {
+      t.diagnostic(`Cannot inspect widget startup: ${diagnosticError.message}`);
+    }
+    t.diagnostic(`Widget startup CNCjs output: ${output}`);
+    throw error;
+  }
   const lcdFrame = async () => page.frame({ name: 'pendant' }).evaluate(() => {
     const reports = window.testLcdReports;
     const count = reports.length - reports.length % 3;
