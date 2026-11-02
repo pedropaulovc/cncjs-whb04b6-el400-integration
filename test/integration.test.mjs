@@ -318,10 +318,8 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   // Reuse this server and HID receiver; every phase finishes before changing units.
   assert.equal(Number(pendant.settings.settings.$13), 0);
   const readProgramUnits = async units => {
-    const modal = event(socket, 'serialport:read', line => line.startsWith('[GC:'));
+    // CNCjs consumes routine [GC:] replies; use its native parser-state contract.
     socket.emit('command', 'SIMULATOR', 'gcode', '$G');
-    const [report] = await modal;
-    assert.ok(report.split(/\s+/).includes(units), `Expected ${units} in ${report}`);
     await expect.poll(() => latestState.parserstate?.modal?.units).toBe(units);
     await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
       window.testControllerState?.parserstate?.modal?.units)).toBe(units);
@@ -340,7 +338,8 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
       await startupWheel(direction, 0x0f);
       await expect.poll(() => ({
         x: Number(latestState.status?.mpos?.x), state: latestState.status.activeState,
-      })).toEqual({ x: direction === 1 ? 10 + 0.1 * scale : 10, state: 'Idle' });
+        units: latestState.parserstate?.modal?.units,
+      })).toEqual({ x: direction === 1 ? 10 + 0.1 * scale : 10, state: 'Idle', units });
       const jogs = writes.slice(unitStepStart).map(line => line.trim()).filter(line => line.startsWith('$J='));
       assert.equal(jogs.length, 1, 'One .1 detent must produce one completed jog');
       const words = jogs[0].match(/^\$J=(G20|G21) G91 X(-?[\d.]+) F([\d.]+)$/);
