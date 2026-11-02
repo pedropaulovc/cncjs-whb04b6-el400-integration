@@ -72,9 +72,13 @@ npm start
 4. Plug in the pendant receiver and click **Connect pendant** inside its widget.
    Choose the WHB04B-6 device in the browser prompt. This permission needs an
    operator click; it cannot be granted by the setup script.
-5. Press **Step**, select X on the pendant, choose a small step, and turn the wheel. CNCjs and
+5. Select X on the pendant, choose a small step, and turn the wheel. It starts in **Step** mode. CNCjs and
    the EL400 should follow the simulated position. Without a pendant, use
    CNCjs's jog buttons or enter `$J=G91 G21 X5 F600` in its console.
+
+The EL400's **ABS** and **INC** modes both track jogging. **Zero X/Y/Z** in INC
+sets an independent incremental datum without changing ABS. Motion continues to
+update both coordinates regardless of which mode is displayed.
 
 The pendant mount includes its entire `web` directory because the widget imports
 the driver from its parent directory. Mounting only `web/widget` breaks that import.
@@ -96,8 +100,8 @@ and readout, not to validate a machining program.
 ## Pendant controls
 
 The pendant follows [LinuxCNC's WHB04B-6 mappings](https://www.linuxcnc.org/docs/master/html/en/man/man1/xhc-whb04b-6.1.html)
-where GRBL supports them. It starts in **MPG**, which adjusts feed override.
-Press **Step** or **Continuous** before using the wheel to move an axis.
+where GRBL supports them. New widgets start in **Step**, so the wheel moves the
+selected distance per detent. Reconnecting the receiver preserves the selected mode.
 
 | Mode | Wheel behavior |
 | --- | --- |
@@ -236,8 +240,9 @@ Unit tests exercise the GRBL protocol and simulated serial isolation. The
 integration test starts the real CNCjs server, checks widget assets, opens the
 simulator, exercises the pendant's session after G20, and checks machine/work
 coordinates through Socket.IO. It also boots both widgets in Chromium and checks
-the EL400 display after a jog. A virtual HID receiver captures the pendant's actual
-LCD packets, including G20/G21 conversion and reconnect behavior.
+the EL400 ABS and INC displays after jogging and independent zeroing. A virtual HID
+receiver exercises first-report Step jogging and captures the pendant's actual LCD
+packets, including G20/G21 conversion and reconnect behavior.
 Browser tests run headlessly. Set `PW_CHANNEL=msedge`
 to use Edge locally instead of Playwright's bundled Chromium.
 CI runs setup and these tests on Windows and Linux. Hardware WebHID permission

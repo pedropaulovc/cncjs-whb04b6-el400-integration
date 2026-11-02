@@ -236,13 +236,52 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await movedAgain;
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
-  // LinuxCNC's packed LCD report: FE FD FE, relative+MPG flags, integer/fraction
+  // LinuxCNC's packed LCD report: FE FD FE, relative+Step flags, integer/fraction
   // coordinate pairs, then 16-bit feed/spindle override percentages.
   await expect.poll(lcdFrame).toEqual([
-    0xfe, 0xfd, 0xfe, 0x82,
+    0xfe, 0xfd, 0xfe, 0x81,
     5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     100, 0, 100, 0, 0,
   ]);
+  // A fresh pendant must jog on its first wheel report without a Step button press.
+  // Use the HID boundary here so parsing and dispatch are exercised too.
+  const startupWheel = jog => page.frame({ name: 'pendant' }).evaluate(jog => {
+    const bytes = Uint8Array.of(0, 0, 0, 0x0e, 0x11, jog & 0xff, 0);
+    const event = new Event('inputreport');
+    Object.defineProperties(event, {
+      reportId: { value: 0x04 },
+      data: { value: new DataView(bytes.buffer) },
+    });
+    window.testHidDevice.dispatchEvent(event);
+  }, jog);
+  await startupWheel(4);
+  await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10.04);
+  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0400');
+  assert.equal(latestState.status.ov[0], 100, 'Startup Step must not adjust feed override');
+  await startupWheel(-4);
+  await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
+  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  // INC has its own datum, but must follow the same live machine motion as ABS.
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
+  const incrementalJog = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 15 && state.status.activeState === 'Idle');
+  assert.equal(new Grbl(pendant).jog('X', 5, 750), 'sent');
+  await incrementalJog;
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('15.0000');
+  // Motion in ABS must also be reflected when returning to INC.
+  const returnJog = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 10 && state.status.activeState === 'Idle');
+  assert.equal(new Grbl(pendant).jog('X', -5, 750), 'sent');
+  await returnJog;
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
   const displayInches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
   await displayInches;
@@ -329,9 +368,9 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     }));
   });
   await toggleLcdCoordinates();
-  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x02, 10, 0, 0, 0]);
+  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x01, 10, 0, 0, 0]);
   await toggleLcdCoordinates();
-  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x82, 5, 0, 0, 0]);
+  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x81, 5, 0, 0, 0]);
   const hidEvent = type => page.frame({ name: 'pendant' }).evaluate(type => {
     const event = new Event(type);
     Object.defineProperty(event, 'device', { value: window.testHidDevice });
@@ -346,7 +385,7 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
     'Disconnected receiver must not receive even a partial LCD frame');
   await hidEvent('connect');
   await expect(pendantFrame.locator('#hidPill')).toHaveText('pendant ✓');
-  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x82, 5, 0, 0, 0]);
+  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x81, 5, 0, 0, 0]);
   assert.deepEqual(browserErrors, [], 'Mounted widgets must boot without browser errors');
   const widgetJogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
   assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 10, 50), 'sent');
@@ -517,7 +556,11 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await press(0x0d);
   await expect(pendantFrame.locator('#log')).toContainText('Enter a valid nonnegative probe plate thickness.');
   assert.deepEqual(getPosition(), stationary, 'A blank probe thickness must not start a probe');
-  await report({ jog: -2 });
+  // Leaving Lead selects MPG; startup now selects Step instead.
+  await report({ rightDialCode: 0x9b });
+  await report({ rightDialCode: 0x1b });
+  await expect.poll(() => latestState.status.ov?.[0]).toBe(100);
+  await report({ rightDialCode: 0x1b, jog: -2 });
   await expect.poll(() => latestState.status.ov?.[0]).toBe(98);
   await report({ rightDialCode: 0x9b, jog: 3 });
   await expect.poll(() => latestState.status.ov?.[2]).toBe(103);
