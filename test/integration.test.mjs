@@ -53,9 +53,9 @@ for (const frame of ['MPos', 'WPos']) {
     const completed = `<Idle|${frame}:0.040,0.000,0.000|FS:0,0>`;
     runner.parse(completed);
     listeners.get('serialport:read')(completed);
-    assert.equal(grbl.jogCompleted(), true, 'Raw endpoint must confirm completion');
+    // Completion now disposes its tracking immediately. Check the consumer
+    // behavior after CNCjs echoes the derived frame, not the disposed predicate.
     listeners.get('controller:state')('Grbl', structuredClone(runner.state));
-    assert.equal(grbl.jogCompleted(), true, 'The derived coordinate frame must not invalidate completion');
     grbl.cancelJog();
     assert.equal(grbl.jog('Y', 0.04, 250), 'sent', 'The first input on another axis must work');
     assert.ok(commands.every(args => args[2] !== 'jogCancel'), 'A completed move must not trigger cancellation');
@@ -505,6 +505,13 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   // The pendant holds later Steps until GRBL acknowledges the first.
   assert.equal(queuedJog.jog('X', -0.04, 250), 'buffered');
   const issuedSequence = pendant.reportSequence;
+  // Another client may explicitly request Idle while the jog is still queued.
+  // Native CNCjs suppresses unchanged frames; the pendant no longer polls here.
+  for (let report = 0; report < 2; report++) {
+    const status = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
+    socket.emit('command', 'SIMULATOR', 'statusreport');
+    assert.match((await status)[0], /^<Idle\|/);
+  }
   await Promise.all([
     expect.poll(() => pendant.reportSequence, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(issuedSequence + 2),
     expect.poll(() => feederState?.queue, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(2),
