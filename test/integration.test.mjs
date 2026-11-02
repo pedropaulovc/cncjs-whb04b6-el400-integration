@@ -781,10 +781,16 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   }, { key, modifier });
   const storedMacros = () => page.frame({ name: 'pendant' }).evaluate(() =>
     JSON.parse(localStorage.getItem('whb04b-controls')).macros);
-  const reloadPendant = async () => {
-    await page.frame({ name: 'pendant' }).evaluate(() => location.reload());
+  const reloadPendantDocument = async () => {
+    const frame = page.frame({ name: 'pendant' });
+    await frame.goto(frame.url(), { waitUntil: 'load' });
     await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
-    await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() => Boolean(window.testPendant))).toBe(true);
+    await frame.waitForFunction(units => Boolean(window.testPendant)
+      && window.testControllerState?.parserstate?.modal?.units === units,
+    state().parserstate.modal.units);
+  };
+  const reloadPendant = async () => {
+    await reloadPendantDocument();
     await pendantFrame.getByText('Macro buttons', { exact: true }).click();
   };
   await expect(pendantFrame.locator('#saveConfig')).toHaveCount(0);
@@ -811,8 +817,7 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   await pendantFrame.locator('#thickness').fill('12.5');
   await pendantFrame.locator('#largeSteps').selectOption('enabled');
   await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
-  await page.frame({ name: 'pendant' }).evaluate(() => location.reload());
-  await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
+  await reloadPendantDocument();
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await expect(pendantFrame.locator('#spindleIncrement')).toHaveValue('125');
   await expect(pendantFrame.locator('#largeSteps')).toHaveValue('enabled');
@@ -826,8 +831,7 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   }
   await pendantFrame.locator('#thickness').fill('0');
   await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
-  await page.frame({ name: 'pendant' }).evaluate(() => location.reload());
-  await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
+  await reloadPendantDocument();
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await expect(pendantFrame.locator('#thickness')).toHaveValue('0');
   await pendantFrame.locator('#largeSteps').selectOption('disabled');
