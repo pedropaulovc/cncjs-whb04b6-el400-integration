@@ -796,14 +796,14 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   await pendantFrame.getByText('Diagnostics', { exact: true }).click();
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await pendantFrame.locator('#spindleIncrement').fill('125');
-  await pendantFrame.locator('#largeSteps').check();
+  await pendantFrame.locator('#largeSteps').selectOption('enabled');
   await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
   await page.frame({ name: 'pendant' }).evaluate(() => location.reload());
   await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await expect(pendantFrame.locator('#spindleIncrement')).toHaveValue('125');
-  await expect(pendantFrame.locator('#largeSteps')).toBeChecked();
-  await pendantFrame.locator('#largeSteps').uncheck();
+  await expect(pendantFrame.locator('#largeSteps')).toHaveValue('enabled');
+  await pendantFrame.locator('#largeSteps').selectOption('disabled');
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await pendantFrame.getByText('Macro buttons', { exact: true }).click();
   await expect(pendantFrame.locator('#thickness')).not.toBeVisible();
