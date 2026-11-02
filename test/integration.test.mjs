@@ -963,6 +963,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   const motion = new Grbl(pendant);
   assert.equal(motion.jog('X', 5, 750), 'sent');
   await expect.poll(() => ({ x: position()[0], phase: state().status.activeState })).toEqual({ x: 10, phase: 'Idle' });
+  await expect.poll(() => Number(state().status.wpos.x)).toBe(5);
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   // Controller report units stay millimetres while the display is inches. Both
   // toggle directions and an external change must preserve the physical datum.
