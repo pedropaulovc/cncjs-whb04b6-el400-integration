@@ -925,6 +925,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   const position = () => ['x', 'y', 'z'].map(axis => Number(state().status.mpos[axis]));
   const confirmed = async (units, readout) => {
     await expect.poll(() => state().parserstate?.modal?.units).toBe(units);
+    await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe(units);
     await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
       window.testControllerState?.parserstate?.modal?.units)).toBe(units);
     await expect(droFrame.getByTestId('axis-value-x')).toHaveText(readout);
