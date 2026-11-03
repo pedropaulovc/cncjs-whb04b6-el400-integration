@@ -41,7 +41,7 @@ for (const frame of ['MPos', 'WPos']) {
     session.status = { phase: 'joined', port: 'SIMULATOR', controller: 'Grbl' };
     session.workflowState = 'idle';
     listeners.get('controller:settings')('Grbl', { settings: { $13: '0', $100: '250', $101: '250', $110: '3000', $111: '3000' } });
-    const grbl = new Grbl(session, () => 20, () => {}, { schedule: () => 0, cancel() {} });
+    const grbl = new Grbl(session, () => {}, { schedule: () => 0, cancel() {} });
     const runner = new GrblRunner();
     runner.parse('[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]');
     const initial = `<Idle|${frame}:0.000,0.000,0.000|WCO:10.000,0.000,0.000|FS:0,0>`;
@@ -147,7 +147,7 @@ async function withRealWidgets(t, scenario) {
   await inches;
   await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe('G20');
   const moved = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 5 && state.status.activeState === 'Idle');
-  assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
+  assert.equal(new Grbl(pendant, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await moved;
   const zeroed = event(socket, 'controller:state', (_, state) => Number(state.status?.wpos?.x) === 0 && Number(state.status?.mpos?.x) === 5);
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X0');
@@ -291,7 +291,7 @@ async function withRealWidgets(t, scenario) {
     return;
   }
   const movedAgain = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 10 && state.status.activeState === 'Idle');
-  assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
+  assert.equal(new Grbl(pendant, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await movedAgain;
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
   // LinuxCNC's packed LCD report: FE FD FE, relative+Step flags, integer/fraction
@@ -458,7 +458,7 @@ async function withRealWidgets(t, scenario) {
   await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x81, 5, 0, 0, 0]);
   assert.deepEqual(browserErrors, [], 'Mounted widgets must boot without browser errors');
   const widgetJogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
-  assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 10, 50), 'sent');
+  assert.equal(new Grbl(pendant, message => t.diagnostic(message)).jog('X', 10, 50), 'sent');
   await widgetJogging;
   const widgetStopped = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Idle');
   await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
@@ -470,7 +470,7 @@ async function withRealWidgets(t, scenario) {
   await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
   assert.deepEqual(browserErrors, [], 'The actual widget Stop handler must work');
   const jogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
-  const controls = new Grbl(pendant, undefined, message => t.diagnostic(message));
+  const controls = new Grbl(pendant, message => t.diagnostic(message));
   assert.equal(controls.jog('X', 10, 50), 'sent');
   await jogging;
   const stopped = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Idle', 2000);
@@ -548,7 +548,7 @@ async function withRealWidgets(t, scenario) {
   }
   // A dwell reports Idle while CNCjs still owns unsent feeder commands.
   // Out-and-back jogs must remain cancellable until they actually reach GRBL.
-  const queuedJog = new Grbl(pendant, undefined, message => t.diagnostic(message));
+  const queuedJog = new Grbl(pendant, message => t.diagnostic(message));
   t.after(() => queuedJog.clearJog());
   assert.equal(pendant.replyTracking, 'synchronized', 'Earlier Stop reset must establish acknowledgement tracking');
   const queuedDwell = event(socket, 'serialport:write', line => line.includes('G4 P5'));
@@ -597,7 +597,7 @@ async function withRealWidgets(t, scenario) {
   lateSession.connect(token);
   await expect.poll(() => lateSession.status.phase).toBe('joined');
   await expect.poll(() => lateSession.state.parserstate?.modal?.units).toBe('G21');
-  const uncertainJog = new Grbl(lateSession, undefined, message => t.diagnostic(message));
+  const uncertainJog = new Grbl(lateSession, message => t.diagnostic(message));
   t.after(() => uncertainJog.clearJog());
   assert.equal(uncertainJog.jog('X', 0.001, 250), 'sent');
   await expect.poll(() => uncertainJog.jogReceipt?.state).toBe('uncertain');
