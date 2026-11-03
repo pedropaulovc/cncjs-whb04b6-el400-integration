@@ -63,7 +63,7 @@ for (const frame of ['MPos', 'WPos']) {
   });
 }
 
-test('real CNCjs serves widgets and reports simulated jog/offset through its controller parser', { timeout: 90000 }, async t => {
+async function withRealWidgets(t, scenario) {
   const reservation = createServer();
   reservation.listen(0, '127.0.0.1');
   await once(reservation, 'listening');
@@ -265,11 +265,26 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   });
   await expect.poll(async () => (await lcdFrame())?.slice(0, 3)).toEqual([0xfe, 0xfd, 0xfe]);
   const droFrame = page.frameLocator('iframe[name="dro"]');
-  // Wait past the startup splash and verify the actual machine coordinate.
-  // A fresh EL400 defaults to inches: 5 mm = 0.1969 in at four decimals.
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.1969', { timeout: 10000 });
-  await droFrame.getByRole('button', { name: /toggle units/i }).click();
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
+  // CNCjs parser units are authoritative, not EL400's standalone inch default.
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000', { timeout: 10000 });
+  if (scenario === 'controls') {
+    await exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, pendant, Grbl,
+      state: () => latestState });
+    await exerciseControls({ page, pendantFrame, socket, writes, macroApi, savedMacro,
+      base, browserErrors, state: () => latestState });
+    const portClosed = event(socket, 'serialport:close');
+    socket.emit('close', 'SIMULATOR');
+    await portClosed;
+    await expect(pendantFrame.locator('#sockPill')).not.toHaveText('joined');
+    await expect(pendantFrame.locator('#sockPill')).toBeVisible();
+    await expect(pendantFrame.locator('#portPill')).toBeVisible();
+    const disconnectedStart = writes.length;
+    await droFrame.getByTestId('btn-toggle-unit').click();
+    await expect(droFrame.getByTestId('controller-unit-status')).toBeVisible();
+    assert.deepEqual(writes.slice(disconnectedStart).map(line => line.trim()).filter(line => /^(G20|G21)$/.test(line)), [],
+      'Disconnected EL400 must not enqueue a unit change');
+    return;
+  }
   const movedAgain = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 10 && state.status.activeState === 'Idle');
   assert.equal(new Grbl(pendant, undefined, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await movedAgain;
@@ -363,10 +378,12 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect.poll(() => latestState.status.ov[0]).toBe(100);
   await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
-  // INC has its own datum, but must follow the same live machine motion as ABS.
+  // Connected INC is CNCjs WPos; zeroing changes the work offset, not motion.
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
   await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
+  await expect.poll(() => Number(latestState.status.wpos.x)).toBe(0);
+  assert.equal(Number(latestState.status.mpos.x), 10, 'EL400 INC zero must not move the machine');
   const incrementalJog = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 15 && state.status.activeState === 'Idle');
   assert.equal(new Grbl(pendant).jog('X', 5, 750), 'sent');
   await incrementalJog;
@@ -382,6 +399,11 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  // Restore the original physical work offset for the unchanged LCD/Step checks.
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X5');
+  await expect.poll(() => Number(latestState.status.wpos.x)).toBe(5);
+  await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
+    Number(window.testControllerState?.status?.wpos?.x))).toBe(5);
   // CNCjs already reports progress: ordinary queued jogs must not add console
   // status queries. Exercise the reported +7/-1 sequence against the real server.
   const nativeJog = new Grbl(pendant);
@@ -407,98 +429,6 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
   await displayMillimetres;
   await expect.poll(async () => (await lcdFrame())?.slice(4, 8)).toEqual([5, 0, 0, 0]);
-  await pendantFrame.getByText('Macro buttons', { exact: true }).click();
-  await expect(pendantFrame.locator('#thickness')).not.toBeVisible();
-  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(0);
-  const unusedMacroButton = pendantFrame.getByRole('combobox', { name: 'Unused Fn combination', exact: true });
-  await unusedMacroButton.selectOption('1');
-  await pendantFrame.getByRole('button', { name: 'Add macro button', exact: true }).click();
-  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(1);
-  await expect(unusedMacroButton.locator('option[value="1"]')).toHaveCount(0);
-  const assignment = pendantFrame.getByRole('combobox', { name: 'Assignment for Fn + Feed+' });
-  await expect(assignment.locator('option', { hasText: 'Pendant units' })).toHaveCount(1);
-  await assignment.selectOption(`cncjs:${savedMacro.id}`);
-  // Draft mappings remain saveable after their panel is collapsed.
-  await pendantFrame.getByText('Macro buttons', { exact: true }).click();
-  await pendantFrame.getByRole('button', { name: 'Save settings', exact: true }).click();
-  await expect(pendantFrame.locator('#settingsStatus')).toContainText('Settings saved');
-  await page.frame({ name: 'pendant' }).evaluate(() => location.reload());
-  await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
-  await pendantFrame.getByText('Macro buttons', { exact: true }).click();
-  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(1);
-  await expect(assignment).toHaveValue(`cncjs:${savedMacro.id}`);
-  const macroButton = (key, modifier = 0) => page.frame({ name: 'pendant' }).evaluate(({ key, modifier }) => {
-    for (const pressed of [key, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
-      detail: { firstKeyCode: pressed ? modifier || key : 0, secondKeyCode: pressed && modifier ? key : 0,
-        leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
-    }));
-  }, { key, modifier });
-  await macroButton(0x04, 0x0c);
-  await expect.poll(() => latestState.parserstate?.modal?.units).toBe('G20');
-  await macroApi(`/${savedMacro.id}`, 'PUT', { name: 'Updated units', content: '%units=21\nG[units]' });
-  // CNCjs configstore uses fs.watchFile's ~5 s polling interval.
-  await expect(assignment.locator('option', { hasText: 'Updated units' })).toHaveCount(1, { timeout: 12000 });
-  await macroButton(0x04, 0x0c);
-  await expect.poll(() => latestState.parserstate?.modal?.units).toBe('G21');
-  await unusedMacroButton.selectOption('2');
-  await pendantFrame.getByRole('button', { name: 'Add macro button', exact: true }).click();
-  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(2);
-  const customAssignment = pendantFrame.getByRole('combobox', { name: 'Assignment for Fn + Feed-' });
-  await customAssignment.selectOption('custom');
-  await pendantFrame.getByRole('textbox', { name: 'G-code for Fn + Feed-', exact: true }).fill('G20\nG21');
-  await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
-  await expect(pendantFrame.locator('#macroStatus')).toContainText('available');
-  await expect(pendantFrame.getByRole('textbox', { name: 'G-code for Fn + Feed-', exact: true })).toHaveValue('G20\nG21');
-  await pendantFrame.getByRole('button', { name: 'Save settings', exact: true }).click();
-  // Start in a distinct mode so the final G21 proves the custom macro drained.
-  const customBaseline = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
-  socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
-  await customBaseline;
-  const customWrites = writes.length;
-  const customCompleted = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
-  await macroButton(0x05, 0x0c);
-  await expect.poll(() => writes.slice(customWrites).map(line => line.trim()).filter(line => ['G20', 'G21'].includes(line)))
-    .toEqual(['G20', 'G21']);
-  await customCompleted;
-  // A response arriving after Stop must never turn into delayed macro execution.
-  await macroApi(`/${savedMacro.id}`, 'PUT', { content: 'G20' });
-  let releaseRead;
-  const readGate = new Promise(resolve => { releaseRead = resolve; });
-  const macroUrl = `${base}/api/macros/${savedMacro.id}`;
-  await page.route(macroUrl, async route => { await readGate; await route.continue(); });
-  try {
-    const waitingRead = page.waitForRequest(macroUrl, { timeout: 5000 });
-    await macroButton(0x04, 0x0c);
-    await waitingRead;
-    await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
-    await macroButton(0x02);
-    releaseRead();
-    await expect(pendantFrame.locator('#log')).toContainText('Saved macro request canceled.');
-    await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
-    assert.equal(latestState.parserstate?.modal?.units, 'G21');
-  } finally { releaseRead(); await page.unroute(macroUrl); }
-  await macroApi(`/${savedMacro.id}`, 'PUT', { content: 'G0 X[xmin]' });
-  await expect(pendantFrame.locator('#macro-1-note')).toContainText('uses xmin', { timeout: 12000 });
-  await macroButton(0x04, 0x0c);
-  await expect(pendantFrame.locator('#log')).toContainText('uses xmin');
-  await macroApi(`/${savedMacro.id}`, 'DELETE');
-  await expect(assignment.locator('option:checked')).toContainText(/unavailable/i, { timeout: 12000 });
-  await macroButton(0x04, 0x0c);
-  await expect(pendantFrame.locator('#log')).toContainText('no longer exists');
-  await page.route(`${base}/api/macros`, route => route.fulfill({ status: 401, body: '{}' }));
-  await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
-  await expect(pendantFrame.locator('#macroStatus')).toContainText('HTTP 401');
-  await expect(assignment).toHaveValue(`cncjs:${savedMacro.id}`);
-  await page.unroute(`${base}/api/macros`);
-  await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
-  await pendantFrame.getByRole('button', { name: 'Remove macro for Fn + Feed+', exact: true }).click();
-  await expect(assignment).toHaveCount(0);
-  await expect(customAssignment).toHaveValue('custom');
-  await pendantFrame.getByRole('button', { name: 'Remove macro for Fn + Feed-', exact: true }).click();
-  await pendantFrame.getByRole('button', { name: 'Save settings', exact: true }).click();
-  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(0);
-  assert.deepEqual(await page.frame({ name: 'pendant' }).evaluate(() =>
-    JSON.parse(localStorage.getItem('whb04b-controls')).macros), {});
   const toggleLcdCoordinates = () => page.frame({ name: 'pendant' }).evaluate(() => {
     for (const key of [0x10, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
       detail: { firstKeyCode: key, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
@@ -698,10 +628,22 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   const getPosition = () => ['x', 'y', 'z'].map(axis => Number(latestState.status.mpos[axis]));
   const stationary = getPosition();
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
-  await pendantFrame.locator('#thickness').fill('');
-  await press(0x0d);
-  await expect(pendantFrame.locator('#log')).toContainText('Enter a valid nonnegative probe plate thickness.');
-  assert.deepEqual(getPosition(), stationary, 'A blank probe thickness must not start a probe');
+  await pendantFrame.locator('#thickness').fill('12.5');
+  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
+  for (const invalid of ['', '-1']) {
+    await pendantFrame.locator('#thickness').fill(invalid);
+    await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'error');
+    await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
+    const probeStart = writes.length;
+    await press(0x0d);
+    await expect(pendantFrame.locator('#log')).toContainText('Enter a valid nonnegative probe plate thickness.');
+    assert.deepEqual(getPosition(), stationary, 'An invalid probe draft must not start a probe');
+    assert.ok(writes.slice(probeStart).every(line => !/\bG38(?:\.\d+)?\b/.test(line)),
+      'An invalid live draft must not probe with the previous saved thickness');
+    assert.equal(await page.frame({ name: 'pendant' }).evaluate(() =>
+      JSON.parse(localStorage.getItem('whb04b-controls')).probeThickness), 12.5,
+    'An invalid probe draft must preserve the last valid saved thickness');
+  }
   // Leaving Lead selects MPG; startup now selects Step instead.
   await report({ rightDialCode: 0x9b });
   await report({ rightDialCode: 0x1b });
@@ -819,4 +761,368 @@ test('real CNCjs serves widgets and reports simulated jog/offset through its con
   await expect(pendantFrame.locator('#sockPill')).not.toHaveText('joined');
   await expect.poll(lcdFrame).toEqual([0xfe, 0xfd, 0xfe, 0x40, ...Array(17).fill(0)]);
   socket.disconnect();
+}
+
+test('real CNCjs motion, unit-aware steps and stop safety', { timeout: 90000 }, async t => {
+  await withRealWidgets(t, 'motion');
 });
+
+test('real CNCjs autosaved controls and bidirectional display units', { timeout: 90000 }, async t => {
+  await withRealWidgets(t, 'controls');
+});
+
+async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, savedMacro,
+  base, browserErrors, state }) {
+  const macroButton = (key, modifier = 0, frameName = 'pendant') => page.frame({ name: frameName }).evaluate(({ key, modifier }) => {
+    for (const pressed of [key, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
+      detail: { firstKeyCode: pressed ? modifier || key : 0, secondKeyCode: pressed && modifier ? key : 0,
+        leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
+    }));
+  }, { key, modifier });
+  const storedMacros = () => page.frame({ name: 'pendant' }).evaluate(() =>
+    JSON.parse(localStorage.getItem('whb04b-controls')).macros);
+  const reloadPendantDocument = async () => {
+    const frame = page.frame({ name: 'pendant' });
+    await frame.goto(frame.url(), { waitUntil: 'load' });
+    await expect(pendantFrame.locator('#sockPill')).toHaveText('joined');
+    await frame.waitForFunction(units => Boolean(window.testPendant)
+      && window.testControllerState?.parserstate?.modal?.units === units,
+    state().parserstate.modal.units);
+  };
+  const reloadPendant = async () => {
+    await reloadPendantDocument();
+    await pendantFrame.getByText('Macro buttons', { exact: true }).click();
+  };
+  await expect(pendantFrame.locator('#saveConfig')).toHaveCount(0);
+  for (const pill of ['sockPill', 'tokenPill', 'portPill']) await expect(pendantFrame.locator(`#${pill}`)).toBeHidden();
+  await expect(pendantFrame.locator('#hidPill')).toBeVisible();
+  const help = pendantFrame.getByRole('button', { name: 'Mode help', exact: true });
+  await help.hover();
+  await expect(pendantFrame.locator('#modeHelp')).toBeVisible();
+  await help.click();
+  await expect(help).toHaveAttribute('aria-expanded', 'true');
+  await help.press('Escape');
+  await expect(pendantFrame.locator('#modeHelp')).toBeHidden();
+  await help.blur();
+  await help.focus();
+  await expect(pendantFrame.locator('#modeHelp')).toBeVisible();
+  await help.press('Escape');
+  await expect(pendantFrame.locator('#modeHelp')).toBeHidden();
+  await expect(pendantFrame.locator('#reconnectSock')).toBeHidden();
+  await pendantFrame.getByText('Diagnostics', { exact: true }).click();
+  await expect(pendantFrame.locator('#reconnectSock')).toBeVisible();
+  await pendantFrame.getByText('Diagnostics', { exact: true }).click();
+  await pendantFrame.getByText('Pendant settings', { exact: true }).click();
+  await pendantFrame.locator('#spindleIncrement').fill('125');
+  await pendantFrame.locator('#thickness').fill('12.5');
+  await pendantFrame.locator('#largeSteps').selectOption('enabled');
+  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
+  await reloadPendantDocument();
+  await pendantFrame.getByText('Pendant settings', { exact: true }).click();
+  await expect(pendantFrame.locator('#spindleIncrement')).toHaveValue('125');
+  await expect(pendantFrame.locator('#largeSteps')).toHaveValue('enabled');
+  await expect(pendantFrame.locator('#thickness')).toHaveValue('12.5');
+  const validSettings = await page.frame({ name: 'pendant' }).evaluate(() => localStorage.getItem('whb04b-controls'));
+  for (const invalid of ['', '-1']) {
+    await pendantFrame.locator('#thickness').fill(invalid);
+    await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'error');
+    assert.equal(await page.frame({ name: 'pendant' }).evaluate(() => localStorage.getItem('whb04b-controls')),
+      validSettings, 'Invalid thickness must not replace any saved settings');
+  }
+  await pendantFrame.locator('#thickness').fill('0');
+  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
+  await reloadPendantDocument();
+  await pendantFrame.getByText('Pendant settings', { exact: true }).click();
+  await expect(pendantFrame.locator('#thickness')).toHaveValue('0');
+  await pendantFrame.locator('#largeSteps').selectOption('disabled');
+  await pendantFrame.getByText('Pendant settings', { exact: true }).click();
+  await pendantFrame.getByText('Macro buttons', { exact: true }).click();
+  await expect(pendantFrame.locator('#thickness')).not.toBeVisible();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(0);
+  const unusedMacroButton = pendantFrame.getByRole('combobox', { name: 'Unused Fn combination', exact: true });
+  await expect(unusedMacroButton.locator('option[value="1"]')).toHaveCount(1);
+  await unusedMacroButton.selectOption('14');
+  await pendantFrame.getByRole('button', { name: 'Add macro button', exact: true }).click();
+  const printedMacro10 = pendantFrame.getByRole('combobox', { name: 'Assignment for Macro-10 (Fn+Macro-10)', exact: true });
+  await printedMacro10.selectOption('custom');
+  const macro10Code = pendantFrame.getByRole('textbox', { name: 'G-code for Macro-10 (Fn+Macro-10)', exact: true });
+  await macro10Code.fill('G20');
+  await expect.poll(storedMacros).toEqual({ 14: 'G20' });
+  await reloadPendant();
+  await expect(macro10Code).toHaveValue('G20');
+  const macro10Start = writes.length;
+  await macroButton(0x10, 0x0c);
+  await expect.poll(() => state().parserstate?.modal?.units).toBe('G20');
+  await expect.poll(() => writes.slice(macro10Start).map(line => line.trim()).filter(line => /^(G20|G21)$/.test(line)))
+    .toEqual(['G20']);
+  await macro10Code.fill('G21');
+  await macroButton(0x10, 0x0c);
+  await expect.poll(() => state().parserstate?.modal?.units).toBe('G21');
+  await pendantFrame.getByRole('button', { name: 'Remove macro for Macro-10 (Fn+Macro-10)', exact: true }).click();
+  await expect.poll(storedMacros).toEqual({});
+  await reloadPendant();
+  await expect(printedMacro10).toHaveCount(0);
+  await unusedMacroButton.selectOption('1');
+  await pendantFrame.getByRole('button', { name: 'Add macro button', exact: true }).click();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(1);
+  await expect(unusedMacroButton.locator('option[value="1"]')).toHaveCount(0);
+  const assignment = pendantFrame.getByRole('combobox', { name: 'Assignment for Macro-1 (Fn+Feed+)', exact: true });
+  await expect(assignment).toHaveValue('disabled');
+  await expect.poll(storedMacros).toEqual({ 1: { source: 'disabled' } });
+  await reloadPendant();
+  await expect(assignment).toHaveValue('disabled');
+  const disabledStart = writes.length;
+  await macroButton(0x04, 0x0c);
+  await expect(pendantFrame.locator('#log')).toContainText('Macro-1 (Fn+Feed+) is disabled.');
+  assert.deepEqual(writes.slice(disabledStart).map(line => line.trim()).filter(line => !['$G', '$$', '?'].includes(line)), [],
+    'A newly added disabled mapping must not execute any machine command');
+  await expect(assignment.locator('option', { hasText: 'Pendant units' })).toHaveCount(1);
+  await assignment.selectOption(`cncjs:${savedMacro.id}`);
+  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
+  await reloadPendant();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(1);
+  await expect(assignment).toHaveValue(`cncjs:${savedMacro.id}`);
+  await pendantFrame.getByText('Default button reference', { exact: true }).click();
+  await expect(pendantFrame.locator('#buttonReference input, #buttonReference select, #buttonReference textarea')).toHaveCount(0);
+  await pendantFrame.getByText('Default button reference', { exact: true }).click();
+  // Both mounted widgets start with the same linked mapping. Disabling it in
+  // the second must update that widget's live controls even though the first
+  // has already written the identical serialization to shared localStorage.
+  await page.evaluate(() => {
+    const frame = document.createElement('iframe');
+    frame.name = 'pendant-peer';
+    frame.style.cssText = 'display:block;width:1100px;height:800px;border:0';
+    frame.src = document.querySelector('iframe[name="pendant"]').src;
+    document.body.append(frame);
+  });
+  const peerFrame = page.frameLocator('iframe[name="pendant-peer"]');
+  try {
+    await expect(peerFrame.locator('#sockPill')).toHaveText('joined');
+    await expect.poll(() => page.frame({ name: 'pendant-peer' }).evaluate(() => Boolean(window.testPendant))).toBe(true);
+    await peerFrame.getByText('Macro buttons', { exact: true }).click();
+    const peerAssignment = peerFrame.getByRole('combobox', { name: 'Assignment for Macro-1 (Fn+Feed+)', exact: true });
+    await expect(peerAssignment).toHaveValue(`cncjs:${savedMacro.id}`);
+    await assignment.selectOption('disabled');
+    await expect.poll(storedMacros).toEqual({ 1: { source: 'disabled' } });
+    await peerAssignment.selectOption('disabled');
+    const sharedDisabledStart = writes.length;
+    for (const [frameName, frame] of [['pendant', pendantFrame], ['pendant-peer', peerFrame]]) {
+      await frame.locator('#log').evaluate(element => { element.textContent = ''; });
+      await macroButton(0x04, 0x0c, frameName);
+      await expect(frame.locator('#log')).toContainText('Macro-1 (Fn+Feed+) is disabled.');
+    }
+    assert.deepEqual(writes.slice(sharedDisabledStart).map(line => line.trim())
+      .filter(line => !['$G', '$$', '?'].includes(line)), [],
+    'Both widgets must stop executing a macro when the same disabled config is saved twice');
+    await assignment.selectOption(`cncjs:${savedMacro.id}`);
+  } finally {
+    await page.locator('iframe[name="pendant-peer"]').evaluate(frame => frame.remove());
+  }
+  await macroButton(0x04, 0x0c);
+  await expect.poll(() => state().parserstate?.modal?.units).toBe('G20');
+  await macroApi(`/${savedMacro.id}`, 'PUT', { name: 'Updated units', content: '%units=21\nG[units]' });
+  // CNCjs configstore uses fs.watchFile's ~5 s polling interval.
+  await expect(assignment.locator('option', { hasText: 'Updated units' })).toHaveCount(1, { timeout: 12000 });
+  await macroButton(0x04, 0x0c);
+  await expect.poll(() => state().parserstate?.modal?.units).toBe('G21');
+  await unusedMacroButton.selectOption('2');
+  await pendantFrame.getByRole('button', { name: 'Add macro button', exact: true }).click();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(2);
+  const customAssignment = pendantFrame.getByRole('combobox', { name: 'Assignment for Macro-2 (Fn+Feed-)', exact: true });
+  await customAssignment.selectOption('custom');
+  const customCode = pendantFrame.getByRole('textbox', { name: 'G-code for Macro-2 (Fn+Feed-)', exact: true });
+  await customCode.fill('G20\nG21');
+  await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
+  await expect(pendantFrame.locator('#macroStatus')).toContainText('available');
+  await expect(customCode).toHaveValue('G20\nG21');
+  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
+  const validMacros = await storedMacros();
+  await customCode.fill('');
+  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'error');
+  assert.deepEqual(await storedMacros(), validMacros, 'Invalid drafts must not replace the saved assignment');
+  await reloadPendant();
+  await expect(customAssignment).toHaveValue('custom');
+  await expect(customCode).toHaveValue('G20\nG21');
+  await expect(assignment).toHaveValue(`cncjs:${savedMacro.id}`);
+  // Start in a distinct mode so the final G21 proves the custom macro drained.
+  const customBaseline = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
+  await customBaseline;
+  const customWrites = writes.length;
+  const customCompleted = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
+  await macroButton(0x05, 0x0c);
+  await expect.poll(() => writes.slice(customWrites).map(line => line.trim()).filter(line => ['G20', 'G21'].includes(line)))
+    .toEqual(['G20', 'G21']);
+  await customCompleted;
+  // A response arriving after Stop must never turn into delayed macro execution.
+  await macroApi(`/${savedMacro.id}`, 'PUT', { content: 'G20' });
+  let releaseRead;
+  const readGate = new Promise(resolve => { releaseRead = resolve; });
+  const macroUrl = `${base}/api/macros/${savedMacro.id}`;
+  await page.route(macroUrl, async route => { await readGate; await route.continue(); });
+  try {
+    const waitingRead = page.waitForRequest(macroUrl, { timeout: 5000 });
+    await macroButton(0x04, 0x0c);
+    await waitingRead;
+    await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
+    await macroButton(0x02);
+    releaseRead();
+    await expect(pendantFrame.locator('#log')).toContainText('Saved macro request canceled.');
+    await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
+    assert.equal(state().parserstate?.modal?.units, 'G21');
+  } finally { releaseRead(); await page.unroute(macroUrl); }
+  await macroApi(`/${savedMacro.id}`, 'PUT', { content: 'G0 X[xmin]' });
+  await expect(pendantFrame.locator('#macro-1-note')).toContainText('uses xmin', { timeout: 12000 });
+  await macroButton(0x04, 0x0c);
+  await expect(pendantFrame.locator('#log')).toContainText('uses xmin');
+  await macroApi(`/${savedMacro.id}`, 'DELETE');
+  await expect(assignment.locator('option:checked')).toContainText(/unavailable/i, { timeout: 12000 });
+  await macroButton(0x04, 0x0c);
+  await expect(pendantFrame.locator('#log')).toContainText('no longer exists');
+  await page.route(`${base}/api/macros`, route => route.fulfill({ status: 401, body: '{}' }));
+  await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
+  await expect(pendantFrame.locator('#macroStatus')).toContainText('HTTP 401');
+  await expect(assignment).toHaveValue(`cncjs:${savedMacro.id}`);
+  await page.unroute(`${base}/api/macros`);
+  await pendantFrame.getByRole('button', { name: 'Refresh CNCjs macros' }).click();
+  await pendantFrame.getByRole('button', { name: 'Remove macro for Macro-1 (Fn+Feed+)', exact: true }).click();
+  await expect(assignment).toHaveCount(0);
+  await expect(customAssignment).toHaveValue('custom');
+  await pendantFrame.getByRole('button', { name: 'Remove macro for Macro-2 (Fn+Feed-)', exact: true }).click();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(0);
+  assert.deepEqual(await page.frame({ name: 'pendant' }).evaluate(() =>
+    JSON.parse(localStorage.getItem('whb04b-controls')).macros), {});
+  await reloadPendant();
+  await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(0);
+  assert.deepEqual(await storedMacros(), {});
+  const removedStart = writes.length;
+  await macroButton(0x04, 0x0c);
+  await expect(pendantFrame.locator('#log')).toContainText('Macro-1 (Fn+Feed+) is not configured.');
+  assert.deepEqual(writes.slice(removedStart).map(line => line.trim()).filter(line => !['$G', '$$', '?'].includes(line)), []);
+  assert.deepEqual(browserErrors, [], 'Autosaved controls must run without browser exceptions');
+}
+
+async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, pendant, Grbl, state }) {
+  const unitWrites = start => writes.slice(start).map(line => line.trim()).filter(line => /^(G20|G21)$/.test(line));
+  const position = () => ['x', 'y', 'z'].map(axis => Number(state().status.mpos[axis]));
+  const confirmed = async (units, readout) => {
+    await expect.poll(() => state().parserstate?.modal?.units).toBe(units);
+    await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe(units);
+    await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
+      window.testControllerState?.parserstate?.modal?.units)).toBe(units);
+    await expect(droFrame.getByTestId('axis-value-x')).toHaveText(readout);
+    await expect(pendantFrame.locator('#mode')).toHaveText(`step (${units === 'G20' ? 'in' : 'mm'})`);
+    await expect(pendantFrame.locator('#largeStepsLabel')).toHaveText(
+      units === 'G20' ? '5/10 in steps (127/254 mm)' : '5/10 mm steps');
+    // Cross two real controller replies before counting writes, including any
+    // echo caused by observing the first confirmation.
+    for (let report = 0; report < 2; report++) {
+      const replied = event(socket, 'serialport:read', line => line.startsWith('<'));
+      socket.emit('command', 'SIMULATOR', 'statusreport');
+      await replied;
+    }
+  };
+  const stationary = position();
+  for (const [units, readout] of [['G20', '0.1969'], ['G21', '5.0000']]) {
+    const start = writes.length;
+    await droFrame.getByTestId('btn-toggle-unit').click();
+    await confirmed(units, readout);
+    assert.deepEqual(unitWrites(start), [units], 'EL400 must request one native unit change without echo');
+    assert.deepEqual(position(), stationary, 'Changing program units must not move the machine');
+  }
+  for (const [units, readout] of [['G20', '0.1969'], ['G21', '5.0000']]) {
+    const start = writes.length;
+    socket.emit('command', 'SIMULATOR', 'gcode', units);
+    await confirmed(units, readout);
+    assert.deepEqual(unitWrites(start), [units], 'External CNCjs units must update EL400 without writing back');
+  }
+  assert.equal(Number(pendant.settings.settings.$13), 0, 'Program inch mode must not change physical report units');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
+  await expect.poll(() => Number(state().status.wpos.x)).toBe(0);
+  assert.equal(position()[0], 5);
+  const motion = new Grbl(pendant);
+  assert.equal(motion.jog('X', 5, 750), 'sent');
+  await expect.poll(() => ({ x: position()[0], phase: state().status.activeState })).toEqual({ x: 10, phase: 'Idle' });
+  await expect.poll(() => Number(state().status.wpos.x)).toBe(5);
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
+  // Controller report units stay millimetres while the display is inches. Both
+  // toggle directions and an external change must preserve the physical datum.
+  await droFrame.getByTestId('btn-toggle-unit').click();
+  await confirmed('G20', '0.1969');
+  await droFrame.getByTestId('btn-toggle-unit').click();
+  await confirmed('G21', '5.0000');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
+  await confirmed('G20', '0.1969');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.3937');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
+  await confirmed('G21', '10.0000');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
+  const offsetStart = writes.length;
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X2.54');
+  await expect.poll(() => Number(state().status.wpos.x)).toBe(2.54);
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('2.5400');
+  assert.equal(position()[0], 10, 'External work-offset changes must not move MPos');
+  assert.deepEqual(writes.slice(offsetStart).map(line => line.trim()).filter(line => line.includes('G10')),
+    ['G21 G10 L20 P1 X2.54'], 'Observing a new WPos must not echo the work-offset command');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
+  await confirmed('G20', '0.1000');
+  const zeroStart = writes.length;
+  await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
+  await expect.poll(() => Number(state().status.wpos.x)).toBe(0);
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
+  assert.equal(position()[0], 10, 'EL400 inch-mode zero must change WPos without motion');
+  const zeroCommands = writes.slice(zeroStart).map(line => line.trim()).filter(line => line.includes('G10'));
+  assert.equal(zeroCommands.length, 1, 'One INC zero must request exactly one work-offset change');
+  assert.match(zeroCommands[0], /\bG10\b/);
+  const preset = async keys => {
+    await droFrame.getByTestId('axis-select-x').click();
+    for (const key of keys) await droFrame.getByTestId(`key-${key}`).click();
+    await droFrame.getByTestId('key-enter').click();
+  };
+  await confirmed('G20', '0.0000');
+  // G4 reports Idle, but holds later MDI work in CNCjs's feeder. Queue a
+  // conflicting unit change before requesting the preset from EL400, whose
+  // confirmed display is still G20. The preset must carry its captured units.
+  const dwellSent = event(socket, 'serialport:write', line => line.trim() === 'G4 P2');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G4 P2');
+  await dwellSent;
+  const inchPresetStart = writes.length;
+  const presetSent = event(socket, 'serialport:write', line => line.includes('G10'));
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
+  assert.equal(state().parserstate.modal.units, 'G20', 'Regression setup must queue G21 behind the dwell');
+  await preset(['0', 'decimal', '1']);
+  await presetSent;
+  await expect.poll(() => Number(state().status.wpos.x)).toBe(2.54);
+  await confirmed('G20', '0.1000');
+  assert.equal(position()[0], 10, 'A queued 0.1-inch INC preset must set WPos to 2.54 mm without motion');
+  const queuedWrites = writes.slice(inchPresetStart).map(line => line.trim());
+  const queuedUnitIndex = queuedWrites.indexOf('G21');
+  const presetIndex = queuedWrites.findIndex(line => line.includes('G10'));
+  assert.ok(queuedUnitIndex >= 0 && presetIndex > queuedUnitIndex,
+    'The conflicting G21 must reach GRBL before the EL400 preset');
+  assert.match(queuedWrites[presetIndex], /^G20\s+G10\b/,
+    'The preset must explicitly restore its captured G20 on the G10 line');
+  assert.equal(queuedWrites.filter(line => line.includes('G10')).length, 1,
+    'One preset must issue one G10, without echo or duplicate conversion');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
+  await confirmed('G21', '2.5400');
+  await preset(['3', 'decimal', '2', '5']);
+  await expect.poll(() => Number(state().status.wpos.x)).toBe(3.25);
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('3.2500');
+  assert.equal(position()[0], 10, 'Millimetre INC preset must preserve MPos');
+  const jogging = event(socket, 'controller:state', (_, value) => value.status?.activeState === 'Jog');
+  assert.equal(motion.jog('X', 10, 50), 'sent');
+  await jogging;
+  const busyStart = writes.length;
+  await droFrame.getByTestId('btn-toggle-unit').click();
+  await expect(droFrame.getByTestId('controller-unit-status')).toBeVisible();
+  assert.deepEqual(unitWrites(busyStart), [], 'Busy controller must reject unit requests');
+  assert.equal(state().parserstate.modal.units, 'G21');
+  motion.cancelJog();
+  await expect.poll(() => state().status.activeState).toBe('Idle');
+  motion.clearJog();
+}
