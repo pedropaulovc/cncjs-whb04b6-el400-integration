@@ -9,7 +9,7 @@ const runtime = path.join(root, '.runtime');
 const sources = {
   el400: {
     repository: 'https://github.com/pedropaulovc/el400.git',
-    revision: 'b80a1cfc6c3a99f96b5cdd5d8687e8dea9ec99eb',
+    revision: '89beab8b66390020983e5c2e0624a9d43959fdda',
     directory: path.join(runtime, 'el400'),
   },
 };
