@@ -805,7 +805,7 @@ async function exerciseSharedClearance({ page, pendantFrame, socket, writes, bas
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await expect(pendantFrame.locator('#thickness')).toHaveCount(0);
   assert.equal(await page.frame({ name: 'pendant' }).evaluate(() =>
-    Object.hasOwn(JSON.parse(localStorage.getItem('whb04b-controls')), 'probeThickness')), false,
+    Object.hasOwn(JSON.parse(localStorage.getItem('whb04b-controls')) ?? {}, 'probeThickness')), false,
   'Pendant settings must not store a separate probe thickness');
 
   // Machine coordinates differ from work coordinates on all three axes.
