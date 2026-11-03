@@ -913,30 +913,20 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   await pendantFrame.getByText('Diagnostics', { exact: true }).click();
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await pendantFrame.locator('#spindleIncrement').fill('125');
-  await pendantFrame.locator('#thickness').fill('12.5');
   await pendantFrame.locator('#largeSteps').selectOption('enabled');
   await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
   await reloadPendantDocument();
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await expect(pendantFrame.locator('#spindleIncrement')).toHaveValue('125');
   await expect(pendantFrame.locator('#largeSteps')).toHaveValue('enabled');
-  await expect(pendantFrame.locator('#thickness')).toHaveValue('12.5');
-  const validSettings = await page.frame({ name: 'pendant' }).evaluate(() => localStorage.getItem('whb04b-controls'));
-  for (const invalid of ['', '-1']) {
-    await pendantFrame.locator('#thickness').fill(invalid);
-    await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'error');
-    assert.equal(await page.frame({ name: 'pendant' }).evaluate(() => localStorage.getItem('whb04b-controls')),
-      validSettings, 'Invalid thickness must not replace any saved settings');
-  }
-  await pendantFrame.locator('#thickness').fill('0');
-  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
-  await reloadPendantDocument();
-  await pendantFrame.getByText('Pendant settings', { exact: true }).click();
-  await expect(pendantFrame.locator('#thickness')).toHaveValue('0');
+  await expect(pendantFrame.locator('#thickness')).toHaveCount(0);
+  assert.equal(await page.frame({ name: 'pendant' }).evaluate(() =>
+    Object.hasOwn(JSON.parse(localStorage.getItem('whb04b-controls')) ?? {}, 'probeThickness')), false,
+  'Reloaded pendant settings must not persist a separate probe thickness');
   await pendantFrame.locator('#largeSteps').selectOption('disabled');
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
   await pendantFrame.getByText('Macro buttons', { exact: true }).click();
-  await expect(pendantFrame.locator('#thickness')).not.toBeVisible();
+  await expect(pendantFrame.locator('#spindleIncrement')).not.toBeVisible();
   await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(0);
   const unusedMacroButton = pendantFrame.getByRole('combobox', { name: 'Unused Fn combination', exact: true });
   await expect(unusedMacroButton.locator('option[value="1"]')).toHaveCount(1);
