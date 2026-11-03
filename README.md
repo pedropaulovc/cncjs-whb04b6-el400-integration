@@ -50,6 +50,12 @@ Stop CNCjs with Ctrl+C before rerunning setup after an update; Windows locks fil
 used by the running server. Setup stops if its managed
 EL400 checkout contains local changes so they can be saved first.
 
+`npm run setup` uses the same installer. Child npm commands read their normal
+project/user `.npmrc` script-approval policy; setup removes only npm lifecycle's
+exported `npm_config_allow_scripts` copy, which npm rejects as an install-time
+option. It does not disable install scripts, change approval files, or remove
+other environment/authentication settings.
+
 ## Practice without a machine
 
 ```sh

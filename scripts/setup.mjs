@@ -14,8 +14,19 @@ const sources = {
   },
 };
 
+const childEnv = { ...process.env };
+if (Object.keys(childEnv).some(key => key.toLowerCase() === 'npm_lifecycle_event' && childEnv[key])) {
+  // npm run exports .npmrc's allow-scripts as a CLI-like environment option,
+  // which child npm rejects for project installs. Let each child npm read the
+  // canonical project/user approval configuration instead; retain every other
+  // environment setting, including authentication and config-file locations.
+  for (const key of Object.keys(childEnv)) {
+    if (key.toLowerCase() === 'npm_config_allow_scripts') delete childEnv[key];
+  }
+}
+
 function run(command, args, cwd = root, output = 'inherit') {
-  const result = spawnSync(command, args, { cwd, stdio: output, encoding: 'utf8' });
+  const result = spawnSync(command, args, { cwd, stdio: output, encoding: 'utf8', env: childEnv });
   if (result.error) throw new Error(`${command}: ${result.error.message}`);
   if (result.status !== 0) {
     throw new Error(`${command} ${args.join(' ')} failed (${result.status}). ${result.stderr || ''}`);
