@@ -267,6 +267,11 @@ async function withRealWidgets(t, scenario) {
   const droFrame = page.frameLocator('iframe[name="dro"]');
   // CNCjs parser units are authoritative, not EL400's standalone inch default.
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000', { timeout: 10000 });
+  if (scenario === 'clearance') {
+    await exerciseSharedClearance({ page, pendantFrame, socket, writes, base, token,
+      browserErrors, state: () => latestState });
+    return;
+  }
   if (scenario === 'controls') {
     await exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, pendant, Grbl,
       state: () => latestState });
@@ -628,22 +633,6 @@ async function withRealWidgets(t, scenario) {
   const getPosition = () => ['x', 'y', 'z'].map(axis => Number(latestState.status.mpos[axis]));
   const stationary = getPosition();
   await pendantFrame.getByText('Pendant settings', { exact: true }).click();
-  await pendantFrame.locator('#thickness').fill('12.5');
-  await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'saved');
-  for (const invalid of ['', '-1']) {
-    await pendantFrame.locator('#thickness').fill(invalid);
-    await expect(pendantFrame.locator('#settingsStatus')).toHaveAttribute('data-state', 'error');
-    await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
-    const probeStart = writes.length;
-    await press(0x0d);
-    await expect(pendantFrame.locator('#log')).toContainText('Enter a valid nonnegative probe plate thickness.');
-    assert.deepEqual(getPosition(), stationary, 'An invalid probe draft must not start a probe');
-    assert.ok(writes.slice(probeStart).every(line => !/\bG38(?:\.\d+)?\b/.test(line)),
-      'An invalid live draft must not probe with the previous saved thickness');
-    assert.equal(await page.frame({ name: 'pendant' }).evaluate(() =>
-      JSON.parse(localStorage.getItem('whb04b-controls')).probeThickness), 12.5,
-    'An invalid probe draft must preserve the last valid saved thickness');
-  }
   // Leaving Lead selects MPG; startup now selects Step instead.
   await report({ rightDialCode: 0x9b });
   await report({ rightDialCode: 0x1b });
@@ -770,6 +759,116 @@ test('real CNCjs motion, unit-aware steps and stop safety', { timeout: 90000 }, 
 test('real CNCjs autosaved controls and bidirectional display units', { timeout: 90000 }, async t => {
   await withRealWidgets(t, 'controls');
 });
+
+test('real CNCjs shared Tool Change Position Z and pending-read Stop safety', { timeout: 90000 }, async t => {
+  await withRealWidgets(t, 'clearance');
+});
+
+async function exerciseSharedClearance({ page, pendantFrame, socket, writes, base, token,
+  browserErrors, state }) {
+  const toolUrl = `${base}/api/tool`;
+  const configureTool = async settings => {
+    const response = await fetch(toolUrl, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(settings),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { err: false });
+    const saved = await fetch(toolUrl, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(saved.status, 200);
+    const configured = await saved.json();
+    for (const [field, value] of Object.entries(settings)) assert.equal(configured[field], value);
+  };
+  const press = async key => {
+    const expectedParser = structuredClone(state().parserstate);
+    await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
+      window.testControllerState?.parserstate)).toEqual(expectedParser);
+    await page.frame({ name: 'pendant' }).evaluate(key => {
+      for (const firstKeyCode of [key, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
+        detail: { firstKeyCode, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
+      }));
+    }, key);
+  };
+  const position = frame => ['x', 'y', 'z'].map(axis => Number(state().status[frame][axis]));
+  const idleAt = async expected => {
+    await expect.poll(() => position('mpos')).toEqual(expected);
+    await expect.poll(() => state().status.activeState).toBe('Idle');
+  };
+  const startInInches = async () => {
+    socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
+    await expect.poll(() => state().parserstate?.modal?.units).toBe('G20');
+  };
+  const clearanceCommands = start => writes.slice(start).map(line => line.trim())
+    .filter(line => /\b(?:G53|G54)\b/.test(line));
+
+  await pendantFrame.getByText('Pendant settings', { exact: true }).click();
+  await expect(pendantFrame.locator('#thickness')).toHaveCount(0);
+  assert.equal(await page.frame({ name: 'pendant' }).evaluate(() =>
+    Object.hasOwn(JSON.parse(localStorage.getItem('whb04b-controls')), 'probeThickness')), false,
+  'Pendant settings must not store a separate probe thickness');
+
+  // Machine coordinates differ from work coordinates on all three axes.
+  // This distinguishes G53 Z from a work-coordinate retract and makes W-Home
+  // prove it returns XY only, without a final move to work Z0.
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X2 Y3 Z4');
+  await expect.poll(() => position('wpos')).toEqual([2, 3, 4]);
+  const initial = position('mpos');
+  await configureTool({ toolChangeZ: -12.5 });
+  await startInInches();
+  const safeStart = writes.length;
+  const safeRead = page.waitForRequest(toolUrl);
+  await press(0x09);
+  assert.equal((await safeRead).method(), 'GET');
+  await idleAt([initial[0], initial[1], -12.5]);
+  assert.equal(state().parserstate.modal.units, 'G21', 'Stored clearance remains metric after a G20 start');
+  assert.deepEqual(clearanceCommands(safeStart), ['G21 G53 G0 G90 Z-12.5']);
+
+  // Editing CNCjs's shared setting must affect the very next physical keypress.
+  await configureTool({ toolChangeZ: -8.25 });
+  await startInInches();
+  const homeStart = writes.length;
+  const homeRead = page.waitForRequest(toolUrl);
+  await press(0x0a);
+  assert.equal((await homeRead).method(), 'GET');
+  await idleAt([initial[0] - 2, initial[1] - 3, -8.25]);
+  assert.deepEqual(position('wpos').slice(0, 2), [0, 0]);
+  assert.notEqual(position('wpos')[2], 0, 'W-Home must leave Z at machine clearance, not work Z0');
+  assert.deepEqual(clearanceCommands(homeStart), [
+    'G21 G53 G0 G90 Z-8.25', 'G21 G54 G0 G90 X0 Y0',
+  ]);
+
+  // Gate a real authenticated read, not a synthetic success response, and press
+  // the physical Stop key before delivering the server's configured height.
+  await configureTool({ toolChangeZ: -3.5 });
+  let releaseRead;
+  const readGate = new Promise(resolve => { releaseRead = resolve; });
+  let readReceived;
+  const pendingRead = new Promise(resolve => { readReceived = resolve; });
+  await page.route(toolUrl, async route => {
+    const response = await route.fetch();
+    readReceived();
+    await readGate;
+    await route.fulfill({ response });
+  });
+  const beforeStop = position('mpos');
+  const stoppedStart = writes.length;
+  try {
+    await press(0x09);
+    await pendingRead;
+    await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
+    await press(0x02);
+    releaseRead();
+    await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
+    await expect(pendantFrame.locator('#log')).toContainText('Safe-Z request canceled.');
+    assert.deepEqual(position('mpos'), beforeStop, 'A late tool-setting response must not move after Stop');
+    assert.deepEqual(clearanceCommands(stoppedStart), []);
+  } finally {
+    releaseRead();
+    await page.unroute(toolUrl);
+  }
+  assert.deepEqual(browserErrors, [], 'Shared clearance controls must run without browser exceptions');
+}
 
 async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, savedMacro,
   base, browserErrors, state }) {

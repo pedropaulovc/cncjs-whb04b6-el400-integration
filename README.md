@@ -143,10 +143,10 @@ percentage of the physical axis maximum rate in either unit mode.
 and clearance before jogging, especially when selecting inch steps.
 The widget configures spindle speed increments and custom macros, but has no
 separate Step feed setting. Settings are local to the browser and CNCjs address.
-Probe plate thickness also saves automatically in millimetres (zero is allowed).
-Invalid or empty drafts show a settings error and preserve the last valid saved
-settings. Probe-Z validates the current live thickness field and refuses a blank
-or negative draft; it never silently substitutes the previous saved thickness.
+Probe-Z uses CNCjs's **Tool** widget **Touch Plate Height**, not a pendant-local
+thickness setting. Safe-Z and W-Home share **Tool Change Position Z** from that
+same widget. These server settings are read afresh for every button press; there
+is no separate pendant clearance or probe-thickness setting.
 
 Normal jogging uses CNCjs's existing position/state updates without adding a
 stream of `client> ?` queries. Ambiguous completion and cancellation can still
@@ -217,11 +217,17 @@ to report that motion has stopped before resetting the controller. Pendant motio
 commands stay blocked until the stop is confirmed. A running or paused program is
 canceled even during a dwell, when GRBL reports Idle. With no active program,
 Stop at Idle or during jogging does not switch off the spindle. Follow the controller's unlock/homing procedure
-after a reset. Its upstream Safe-Z and W-Home
-macros assume machine Z **-5 mm**; Probe-Z assumes a **50 mm** downward search and
-defaults to a **20 mm** plate. Check those settings against the machine before
-using those buttons. The supported manual workflow here is three-axis GRBL;
-the pendant's A/B/C selectors do not add axes to a three-axis controller.
+after a reset. Before using Safe-Z, W-Home, or Probe-Z, configure CNCjs's **Tool**
+widget. **Tool Change Position Z** is a machine-coordinate Z in millimetres;
+Safe-Z retracts there, and W-Home retracts there before moving to G54 work X0 Y0,
+leaving Z at clearance (it does not move to work Z0). **Touch Plate Height** is
+the probe plate thickness in millimetres; Probe-Z retains its **50 mm** downward
+search and **3 mm** retract. CNCjs defaults an unset Tool Change Position Z to
+**0 mm** and an unset Touch Plate Height to **0 mm**; neither default is a safety
+guarantee. Set and check both against the actual machine, tool, and plate.
+Present invalid settings or failed reads block the action rather than falling
+back to an old pendant value. The supported manual workflow here is three-axis
+GRBL; the pendant's A/B/C selectors do not add axes to a three-axis controller.
 
 FluidNC controllers also work with CNCjs's **Grbl** controller type. FluidNC's `$$`
 omits the report units and axis maximum rates the pendant needs. After joining an
@@ -292,15 +298,18 @@ checks positive and negative 0.1-inch (2.54 mm) Step moves, then 0.1-mm moves af
 switching to G21. It verifies unit-aware readouts, axis-maximum wire feed despite
 50% program Feed %, and unchanged parser modal units after jogging, with `$13=0`.
 It also checks that queued +7/−1 mm jogs complete without extra status queries.
-The shared server/browser fixture runs separate motion-safety and controls
-scenarios, each with its own 90-second deadline. The controls scenario checks
+The shared server/browser fixture runs separate motion-safety, controls, and
+shared-Tool-setting scenarios, each with its own 90-second deadline. The shared
+setting scenario presses physical Safe-Z/W-Home inputs against real CNCjs,
+checks metric machine clearance after a G20 start, verifies a changed setting
+on the next press, and cancels a pending read with Stop. The controls scenario checks
 EL400-to-controller and external-controller G20/G21 changes without echo,
 physical WPos/datum preservation across unit conversion (including a preset
 queued behind a conflicting G21 during an Idle-reporting dwell), rejected busy/disconnected
 unit requests, disabled mappings and autosaved assignment/removal across reloads,
 live macro disabling in two widgets sharing browser storage, Mode help
-interaction, and healthy/fault diagnostics visibility. Invalid live probe drafts
-must refuse probing without overwriting the last valid saved thickness.
+interaction, and healthy/fault diagnostics visibility. The pendant has no local
+probe-thickness field or persisted thickness setting.
 Widget startup waits for both iframe documents (including their module scripts)
 to finish loading before starting the unchanged socket-join and HID assertions.
 Startup failures report iframe readiness, boot/socket state, widget logs, and
