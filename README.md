@@ -73,6 +73,16 @@ npm start
    | WHB04B-6 pendant | `/whb04b/widget/index.html` |
    | EL400 DRO | `/el400/?source=cncjs` |
 
+   EL400's **Enter fullscreen** control below the readout requests browser
+   fullscreen on a click; **Exit fullscreen** or Esc leaves it. This differs
+   from the CNCjs widget menu, which expands only within the workspace.
+   Browser support or embedding policies can block fullscreen. If so, use
+   **Open EL400 in new tab** and try again, or use the browser's fullscreen
+   command. The link retains the current connection URL, which may contain a
+   CNCjs token; treat it as a credential and do not share it. A tab opened from
+   the widget may inherit its sandbox; if necessary, copy the link into an
+   independent tab instead.
+
 4. Plug in the pendant receiver and click **Connect pendant** inside its widget.
    Choose the WHB04B-6 device in the browser prompt. This permission needs an
    operator click; it cannot be granted by the setup script.
