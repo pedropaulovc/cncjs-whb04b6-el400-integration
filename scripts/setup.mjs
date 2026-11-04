@@ -6,13 +6,6 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runtime = path.join(root, '.runtime');
-const sources = {
-  el400: {
-    repository: 'https://github.com/pedropaulovc/el400.git',
-    revision: '89beab8b66390020983e5c2e0624a9d43959fdda',
-    directory: path.join(runtime, 'el400'),
-  },
-};
 
 const childEnv = { ...process.env };
 if (Object.keys(childEnv).some(key => key.toLowerCase() === 'npm_lifecycle_event' && childEnv[key])) {
@@ -52,33 +45,12 @@ function npmCli() {
   return candidate;
 }
 
-function checkout(source) {
-  const { repository, revision, directory } = source;
-  if (!existsSync(directory)) {
-    run('git', ['clone', repository, directory]);
-    run('git', ['checkout', '--detach', revision], directory);
-    return;
-  }
-  if (!existsSync(path.join(directory, '.git'))) {
-    throw new Error(`Refusing to overwrite ${directory}: it is not a managed Git checkout.`);
-  }
-  const origin = run('git', ['remote', 'get-url', 'origin'], directory, 'pipe');
-  if (origin !== repository) throw new Error(`Unexpected origin in ${directory}: ${origin}`);
-  const status = run('git', ['status', '--porcelain', '--untracked-files=normal'], directory, 'pipe');
-  if (status) throw new Error(`Local changes exist in ${directory}. Save them before rerunning setup.`);
-  const current = run('git', ['rev-parse', 'HEAD'], directory, 'pipe');
-  if (current === revision) return;
-  run('git', ['fetch', 'origin', revision], directory);
-  run('git', ['checkout', '--detach', revision], directory);
-}
-
 try {
   const [major, minor] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 12)) {
     throw new Error('Node.js 22.12 or newer is required. Install a current Node.js LTS release with npm.');
   }
   console.log(`Setting up CNCjs manual milling integration in ${root}`);
-  run('git', ['--version']);
   const npm = npmCli();
   run(process.execPath, [npm, '--version']);
   if (!existsSync(path.join(root, 'package-lock.json'))) {
@@ -86,16 +58,15 @@ try {
   }
   run(process.execPath, [npm, 'ci']);
   mkdirSync(runtime, { recursive: true });
-  for (const source of Object.values(sources)) checkout(source);
-  run(process.execPath, [npm, 'ci'], sources.el400.directory);
-  run(process.execPath, [npm, 'run', 'build', '--', '--base=/el400/'], sources.el400.directory);
   const require = createRequire(import.meta.url);
+  const el400PackagePath = require.resolve('el400/package.json');
+  const el400Package = JSON.parse(readFileSync(el400PackagePath, 'utf8'));
   const pendantPackagePath = require.resolve('cncjs-pendant-whb04b-6/package.json');
   const pendantPackage = JSON.parse(readFileSync(pendantPackagePath, 'utf8'));
   const config = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     cncjsVersion: JSON.parse(readFileSync(path.join(root, 'node_modules/cncjs/package.json'), 'utf8')).version,
-    el400: { revision: sources.el400.revision, mountPath: path.join(sources.el400.directory, 'dist') },
+    el400: { version: el400Package.version, mountPath: path.join(path.dirname(el400PackagePath), 'web') },
     pendant: { version: pendantPackage.version, mountPath: path.join(path.dirname(pendantPackagePath), 'web') },
   };
   for (const filename of [path.join(config.el400.mountPath, 'index.html'),
@@ -114,6 +85,6 @@ try {
   console.log('Setup complete. Run npm start for simulation, or npm run machine for a physical controller.');
 } catch (error) {
   console.error(`Setup failed: ${error.message}`);
-  console.error('Prerequisites: Git and Node.js 22.12+ with npm on PATH. See README.md for Windows and Linux installation.');
+  console.error('Prerequisites: Node.js 22.12+ with npm on PATH. See README.md for Windows and Linux installation.');
   process.exitCode = 1;
 }
