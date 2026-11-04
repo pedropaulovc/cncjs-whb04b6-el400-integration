@@ -80,12 +80,15 @@ npm start
    the EL400 should follow the simulated position. Without a pendant, use
    CNCjs's jog buttons or enter `$J=G91 G21 X5 F600` in its console.
 
-The EL400's **ABS** and **INC** modes both track jogging. In CNCjs mode, ABS
-shows machine position (**MPos**) and INC shows the controller's work position
-(**WPos**). **Zero X/Y/Z** or an INC preset requests a **G10** work-offset
-change, not motion: MPos stays unchanged and CNCjs and EL400 show the confirmed
-WPos. External work-offset changes also update INC. Standalone EL400 use retains
-its independent incremental datum.
+The EL400's **ABS** and **INC** modes both track jogging. With a native GRBL
+CNCjs controller, ABS shows the controller's work position (**WPos**). ABS
+zero, preset and other datum edits request controller work-offset changes
+using **G10**, without moving the machine; external offset or active work
+coordinate changes update ABS. INC uses an independent local datum based on
+machine position (**MPos**): INC datum edits never write controller offsets,
+and external offset changes do not reset it. While disconnected, ABS remains
+controller-owned and INC uses the last machine position rather than switching
+to manual counters.
 
 In CNCjs mode the controller's native **G20/G21** state also owns the EL400 unit
 display. EL400's unit button requests G20 or G21; it changes the display only

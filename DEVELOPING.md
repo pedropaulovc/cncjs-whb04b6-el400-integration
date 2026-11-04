@@ -10,8 +10,10 @@ Unit tests exercise the GRBL protocol and simulated serial isolation. The
 integration test starts the real CNCjs server, checks widget assets, opens the
 simulator, exercises the pendant's session after G20, and checks machine/work
 coordinates through Socket.IO. It also boots both widgets in Chromium and checks
-the EL400 ABS and controller-owned INC displays after jogging and work-offset changes. A virtual HID
-receiver exercises first-report Step jogging and captures the pendant's actual LCD
+controller-owned EL400 ABS and independent local INC after jogging and
+work-offset changes, including ABS zero/presets and INC zero/preset/half without
+controller writes. A virtual HID receiver exercises first-report Step jogging and
+captures the pendant's actual LCD
 packets, including G20/G21 conversion and reconnect behavior. The same receiver
 checks positive and negative 0.1-inch (2.54 mm) Step moves, then 0.1-mm moves after
 switching to G21. It verifies unit-aware readouts, axis-maximum wire feed despite
@@ -23,7 +25,7 @@ setting scenario presses physical Safe-Z/W-Home inputs against real CNCjs,
 checks metric machine clearance after a G20 start, verifies a changed setting
 on the next press, and cancels a pending read with Stop. The controls scenario checks
 EL400-to-controller and external-controller G20/G21 changes without echo,
-physical WPos/datum preservation across unit conversion (including a preset
+physical WPos/datum preservation across unit conversion (including an ABS preset
 queued behind a conflicting G21 during an Idle-reporting dwell), rejected busy/disconnected
 unit requests, disabled mappings and autosaved assignment/removal across reloads,
 live macro disabling in two widgets sharing browser storage, Mode help
