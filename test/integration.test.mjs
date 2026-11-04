@@ -266,7 +266,7 @@ async function withRealWidgets(t, scenario) {
   await expect.poll(async () => (await lcdFrame())?.slice(0, 3)).toEqual([0xfe, 0xfd, 0xfe]);
   const droFrame = page.frameLocator('iframe[name="dro"]');
   // CNCjs parser units are authoritative, not EL400's standalone inch default.
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000', { timeout: 10000 });
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000', { timeout: 10000 });
   if (scenario === 'clearance') {
     await exerciseSharedClearance({ page, pendantFrame, socket, writes, base, token,
       browserErrors, state: () => latestState });
@@ -293,7 +293,7 @@ async function withRealWidgets(t, scenario) {
   const movedAgain = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 10 && state.status.activeState === 'Idle');
   assert.equal(new Grbl(pendant, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await movedAgain;
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   // LinuxCNC's packed LCD report: FE FD FE, relative+Step flags, integer/fraction
   // coordinate pairs, then 16-bit feed/spindle override percentages.
   await expect.poll(lcdFrame).toEqual([
@@ -317,7 +317,7 @@ async function withRealWidgets(t, scenario) {
   await startupWheel(4);
   await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10.04);
   await expect.poll(() => latestState.status.activeState).toBe('Idle');
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0400');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0400');
   assert.equal(latestState.status.ov[0], 100, 'Startup Step must not adjust feed override');
   assert.ok(writes.slice(stepWriteStart).some(line => line.trim() === `$J=G21 G91 X0.0400 F${axisMaxFeed}`),
     'Step speed must use the selected axis maximum, not a pendant-only feed setting');
@@ -330,7 +330,7 @@ async function withRealWidgets(t, scenario) {
   await startupWheel(-4);
   await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
   await expect.poll(() => latestState.status.activeState).toBe('Idle');
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   assert.ok(writes.slice(reducedOverrideWrites).some(line => line.trim() === `$J=G21 G91 X-0.0400 F${axisMaxFeed}`),
     'Program Feed % must not change LinuxCNC-style Step speed');
   assert.equal(stepOverride.overrideTarget('feed', 100), 'sent');
@@ -382,28 +382,30 @@ async function withRealWidgets(t, scenario) {
   assert.equal(stepOverride.overrideTarget('feed', 100), 'sent');
   await expect.poll(() => latestState.status.ov[0]).toBe(100);
   await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
-  // Connected INC is CNCjs WPos; zeroing changes the work offset, not motion.
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
+  // INC has its own datum; zeroing it must not change CNCjs WPos.
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  const incZeroStart = writes.length;
   await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
-  await expect.poll(() => Number(latestState.status.wpos.x)).toBe(0);
-  assert.equal(Number(latestState.status.mpos.x), 10, 'EL400 INC zero must not move the machine');
+  assert.equal(Number(latestState.status.wpos.x), 5);
+  assert.equal(Number(latestState.status.mpos.x), 10);
+  assert.ok(!writes.slice(incZeroStart).some(line => /\bG10\b/.test(line)), 'INC zero must not write controller offsets');
   const incrementalJog = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 15 && state.status.activeState === 'Idle');
   assert.equal(new Grbl(pendant).jog('X', 5, 750), 'sent');
   await incrementalJog;
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('15.0000');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
   // Motion in ABS must also be reflected when returning to INC.
   const returnJog = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 10 && state.status.activeState === 'Idle');
   assert.equal(new Grbl(pendant).jog('X', -5, 750), 'sent');
   await returnJog;
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   // Restore the original physical work offset for the unchanged LCD/Step checks.
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X5');
   await expect.poll(() => Number(latestState.status.wpos.x)).toBe(5);
@@ -418,13 +420,13 @@ async function withRealWidgets(t, scenario) {
   assert.equal(nativeJog.jog('X', -1, 250), 'buffered');
   await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(16);
   await expect.poll(() => nativeJog.jogPhase).toBe('idle');
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('16.0000');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('11.0000');
   assert.deepEqual(writes.slice(queryStart).filter(line => line.trim() === '?'), [],
     'Native CNCjs progress must complete a normal queued jog without pendant status polling');
   assert.equal(nativeJog.jog('X', -6, 750), 'sent');
   await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
   await expect.poll(() => nativeJog.jogPhase).toBe('idle');
-  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   const displayInches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
   await displayInches;
@@ -1111,6 +1113,10 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
       await replied;
     }
   };
+  // Give ABS a nonzero controller datum before testing unit conversion.
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X5');
+  await expect.poll(() => Number(state().status.wpos.x)).toBe(5);
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   const stationary = position();
   for (const [units, readout] of [['G20', '0.1969'], ['G21', '5.0000']]) {
     const start = writes.length;
@@ -1126,7 +1132,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
     assert.deepEqual(unitWrites(start), [units], 'External CNCjs units must update EL400 without writing back');
   }
   assert.equal(Number(pendant.settings.settings.$13), 0, 'Program inch mode must not change physical report units');
-  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  // ABS is controller-owned: this zero changes WPos, not MPos.
   await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
   await expect.poll(() => Number(state().status.wpos.x)).toBe(0);
@@ -1165,7 +1171,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
   assert.equal(position()[0], 10, 'EL400 inch-mode zero must change WPos without motion');
   const zeroCommands = writes.slice(zeroStart).map(line => line.trim()).filter(line => line.includes('G10'));
-  assert.equal(zeroCommands.length, 1, 'One INC zero must request exactly one work-offset change');
+  assert.equal(zeroCommands.length, 1, 'One ABS zero must request exactly one work-offset change');
   assert.match(zeroCommands[0], /\bG10\b/);
   const preset = async keys => {
     await droFrame.getByTestId('axis-select-x').click();
@@ -1187,7 +1193,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   await presetSent;
   await expect.poll(() => Number(state().status.wpos.x)).toBe(2.54);
   await confirmed('G20', '0.1000');
-  assert.equal(position()[0], 10, 'A queued 0.1-inch INC preset must set WPos to 2.54 mm without motion');
+  assert.equal(position()[0], 10, 'A queued 0.1-inch ABS preset must set WPos to 2.54 mm without motion');
   const queuedWrites = writes.slice(inchPresetStart).map(line => line.trim());
   const queuedUnitIndex = queuedWrites.indexOf('G21');
   const presetIndex = queuedWrites.findIndex(line => line.includes('G10'));
@@ -1202,7 +1208,35 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   await preset(['3', 'decimal', '2', '5']);
   await expect.poll(() => Number(state().status.wpos.x)).toBe(3.25);
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('3.2500');
-  assert.equal(position()[0], 10, 'Millimetre INC preset must preserve MPos');
+  assert.equal(position()[0], 10, 'Millimetre ABS preset must preserve MPos');
+  // Local INC edits never reach the controller, even after external offset changes.
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('10.0000');
+  const localStart = writes.length;
+  await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
+  await preset(['8']);
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('8.0000');
+  await droFrame.getByTestId('axis-select-x').click();
+  await droFrame.getByTestId('btn-half').click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('4.0000');
+  assert.equal(Number(state().status.wpos.x), 3.25, 'INC datum edits must preserve WPos');
+  assert.equal(position()[0], 10, 'INC datum edits must not move MPos');
+  assert.ok(!writes.slice(localStart).some(line => /\bG10\b/.test(line)), 'INC zero, preset and half must not issue G10');
+  const externalStart = writes.length;
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X7');
+  await expect.poll(() => Number(state().status.wpos.x)).toBe(7);
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('4.0000');
+  assert.deepEqual(writes.slice(externalStart).map(line => line.trim()).filter(line => /\bG10\b/.test(line)),
+    ['G21 G10 L20 P1 X7'], 'An external offset change must not be echoed');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('7.0000');
+  assert.equal(position()[0], 10);
+  assert.equal(motion.jog('X', 1, 750), 'sent');
+  await expect.poll(() => ({ x: position()[0], phase: state().status.activeState })).toEqual({ x: 11, phase: 'Idle' });
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('8.0000');
+  await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
+  await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   const jogging = event(socket, 'controller:state', (_, value) => value.status?.activeState === 'Jog');
   assert.equal(motion.jog('X', 10, 50), 'sent');
   await jogging;
