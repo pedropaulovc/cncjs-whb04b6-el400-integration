@@ -245,7 +245,9 @@ omits the report units and axis maximum rates the pendant needs. After joining a
 idle controller, the widget sends `$I` and then reads `$/report_inches`,
 `$/axes/{x,y,z}/steps_per_mm`, and `$/axes/{x,y,z}/max_rate_mm_per_min`. These
 read-only queries appear in the CNCjs console. Fn spindle-speed changes stay
-unavailable on FluidNC.
+unavailable on FluidNC. The EL400 likewise sends `$I` and reads `$/report_inches`
+when `$$` omits `$13`. When a status report arrives without WCO (FluidNC sends it
+in about one report in ten), the EL400 reads its work offsets with `$#`.
 
 The EL400 receives controller coordinates, not independent scale measurements.
 It therefore cannot detect missed steps, backlash, or a stalled axis. Its local
