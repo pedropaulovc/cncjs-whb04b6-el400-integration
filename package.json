@@ -24,7 +24,7 @@
     "@serialport/binding-mock": "10.2.2",
     "@serialport/stream": "10.5.0",
     "cncjs": "1.11.5",
-    "cncjs-conversational": "0.2.0",
+    "cncjs-conversational": "0.2.2",
     "cncjs-pendant-whb04b-6": "3.2.9",
     "el400": "0.3.1"
   },
