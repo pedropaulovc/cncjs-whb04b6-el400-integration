@@ -76,8 +76,9 @@ npm start
    | Conversational | `/conversational/` |
 
    The conversational widget generates G-code for facing, side facing, squaring
-   up stock, pockets and bolt circles. Use its **Download .nc** button, then
-   CNCjs's **Upload G-code**, to load a program.
+   up stock, pockets and bolt circles. With a port open, its **Load in CNCjs**
+   button replaces the program loaded in CNCjs, ready for the Visualizer and
+   **Run**.
 
    EL400's **Enter fullscreen** control below the readout requests browser
    fullscreen on a click; **Exit fullscreen** or Esc leaves it. This differs

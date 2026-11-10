@@ -59,18 +59,18 @@ try {
   run(process.execPath, [npm, 'ci']);
   mkdirSync(runtime, { recursive: true });
   const require = createRequire(import.meta.url);
-  const el400PackagePath = require.resolve('el400/package.json');
-  const el400Package = JSON.parse(readFileSync(el400PackagePath, 'utf8'));
-  const pendantPackagePath = require.resolve('cncjs-pendant-whb04b-6/package.json');
-  const pendantPackage = JSON.parse(readFileSync(pendantPackagePath, 'utf8'));
-  const conversationalPackagePath = require.resolve('cncjs-conversational/package.json');
-  const conversationalPackage = JSON.parse(readFileSync(conversationalPackagePath, 'utf8'));
+  // Each widget is an npm package whose `web` directory CNCjs mounts.
+  const widgetPackage = (name) => {
+    const packagePath = require.resolve(`${name}/package.json`);
+    const { version } = JSON.parse(readFileSync(packagePath, 'utf8'));
+    return { version, mountPath: path.join(path.dirname(packagePath), 'web') };
+  };
   const config = {
     schemaVersion: 4,
     cncjsVersion: JSON.parse(readFileSync(path.join(root, 'node_modules/cncjs/package.json'), 'utf8')).version,
-    el400: { version: el400Package.version, mountPath: path.join(path.dirname(el400PackagePath), 'web') },
-    pendant: { version: pendantPackage.version, mountPath: path.join(path.dirname(pendantPackagePath), 'web') },
-    conversational: { version: conversationalPackage.version, mountPath: path.join(path.dirname(conversationalPackagePath), 'web') },
+    el400: widgetPackage('el400'),
+    pendant: widgetPackage('cncjs-pendant-whb04b-6'),
+    conversational: widgetPackage('cncjs-conversational'),
   };
   for (const filename of [path.join(config.el400.mountPath, 'index.html'),
     path.join(config.conversational.mountPath, 'index.html'),
