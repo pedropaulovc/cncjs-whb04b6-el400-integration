@@ -63,13 +63,17 @@ try {
   const el400Package = JSON.parse(readFileSync(el400PackagePath, 'utf8'));
   const pendantPackagePath = require.resolve('cncjs-pendant-whb04b-6/package.json');
   const pendantPackage = JSON.parse(readFileSync(pendantPackagePath, 'utf8'));
+  const conversationalPackagePath = require.resolve('cncjs-conversational/package.json');
+  const conversationalPackage = JSON.parse(readFileSync(conversationalPackagePath, 'utf8'));
   const config = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     cncjsVersion: JSON.parse(readFileSync(path.join(root, 'node_modules/cncjs/package.json'), 'utf8')).version,
     el400: { version: el400Package.version, mountPath: path.join(path.dirname(el400PackagePath), 'web') },
     pendant: { version: pendantPackage.version, mountPath: path.join(path.dirname(pendantPackagePath), 'web') },
+    conversational: { version: conversationalPackage.version, mountPath: path.join(path.dirname(conversationalPackagePath), 'web') },
   };
   for (const filename of [path.join(config.el400.mountPath, 'index.html'),
+    path.join(config.conversational.mountPath, 'index.html'),
     path.join(config.pendant.mountPath, 'widget/index.html'),
     path.join(config.pendant.mountPath, 'widget/whb04b-widget.js'),
     path.join(config.pendant.mountPath, 'widget/cncjs-session.js'),
