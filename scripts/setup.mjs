@@ -66,14 +66,17 @@ try {
     return { version, mountPath: path.join(path.dirname(packagePath), 'web') };
   };
   const config = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     cncjsVersion: JSON.parse(readFileSync(path.join(root, 'node_modules/cncjs/package.json'), 'utf8')).version,
     el400: widgetPackage('el400'),
     pendant: widgetPackage('cncjs-pendant-whb04b-6'),
     conversational: widgetPackage('cncjs-conversational'),
+    dechatter: widgetPackage('dechatter'),
   };
   for (const filename of [path.join(config.el400.mountPath, 'index.html'),
     path.join(config.conversational.mountPath, 'index.html'),
+    path.join(config.dechatter.mountPath, 'index.html'),
+    path.join(config.dechatter.mountPath, 'pyodide/pyodide.asm.wasm'),
     path.join(config.pendant.mountPath, 'widget/index.html'),
     path.join(config.pendant.mountPath, 'widget/whb04b-widget.js'),
     path.join(config.pendant.mountPath, 'widget/cncjs-session.js'),

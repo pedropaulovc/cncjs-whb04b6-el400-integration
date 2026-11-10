@@ -86,7 +86,8 @@ async function withRealWidgets(t, scenario) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   assert.ok(response?.ok, `CNCjs did not start: ${output}`);
-  for (const path of ['/el400/', '/whb04b/widget/index.html', '/whb04b/whb04b-webhid.js', '/conversational/']) {
+  for (const path of ['/el400/', '/whb04b/widget/index.html', '/whb04b/whb04b-webhid.js', '/conversational/',
+    '/dechatter/', '/dechatter/widget.js', '/dechatter/pyodide/pyodide.js', '/dechatter/pyodide/pyodide.asm.wasm']) {
     const asset = await fetch(base + path);
     assert.equal(asset.status, 200, path);
   }
