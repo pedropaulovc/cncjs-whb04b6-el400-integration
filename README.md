@@ -10,6 +10,7 @@ Components:
 - [CNCjs](https://github.com/cncjs/cncjs)
 - [WHB04B-6 WebHID pendant](https://github.com/pedropaulovc/cncjs-pendant-whb04b-6)
 - [EL400 DRO](https://github.com/pedropaulovc/el400)
+- [Conversational programming widget](https://github.com/pedropaulovc/cncjs-conversational)
 
 ## Install
 
@@ -65,13 +66,19 @@ npm start
    **115200**, then click **Open**.
 3. In **Manage Widgets**, turn on **Custom Widget** and click **OK**. Use the
    widget's gear icon to set its title and URL, then enable it. Use **More options
-   → Fork Widget** to create the second widget and change its title and URL.
+   → Fork Widget** to create each further widget and change its title and URL.
    The DRO fits best using **More options → Enter Full Screen**.
 
    | Title | URL |
    | --- | --- |
    | WHB04B-6 pendant | `/whb04b/widget/index.html` |
    | EL400 DRO | `/el400/?source=cncjs` |
+   | Conversational | `/conversational/` |
+
+   The conversational widget generates G-code for facing, side facing, squaring
+   up stock, pockets and bolt circles. With a port open, its **Load in CNCjs**
+   button replaces the program loaded in CNCjs, ready for the Visualizer and
+   **Run**.
 
    EL400's **Enter fullscreen** control below the readout requests browser
    fullscreen on a click; **Exit fullscreen** or Esc leaves it. This differs
@@ -277,7 +284,7 @@ browser permissions, which this launcher does not configure.
 - **Port already in use:** stop the other server or supply `--port`.
 
 Runtime files live under `.runtime/`: `install.json` records widget paths and
-the pendant and EL400 npm versions. `cncjs-simulator.json` and
+the pendant, EL400 and conversational npm versions. `cncjs-simulator.json` and
 `cncjs-machine.json` hold separate server settings. These files can contain
 credentials and are excluded from Git.
 To rebuild from scratch, stop the server, save any wanted runtime settings and

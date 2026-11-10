@@ -40,9 +40,10 @@ to use Edge locally instead of Playwright's bundled Chromium.
 CI runs setup and these tests on Windows and Linux. Hardware WebHID permission
 and physical motion still require the operator checks in the README.
 
-Publish pendant or EL400 changes as an npm release from the respective repository
-before updating this integration. Install the chosen release with
-`npm install --save-exact cncjs-pendant-whb04b-6@<version>` or
-`npm install --save-exact el400@<version>`, commit both package files, then rerun
+Publish pendant, EL400 or conversational widget changes as an npm release from
+the respective repository before updating this integration. Install the chosen
+release with `npm install --save-exact cncjs-pendant-whb04b-6@<version>`,
+`npm install --save-exact el400@<version>` or
+`npm install --save-exact cncjs-conversational@<version>`, commit both package files, then rerun
 setup and the tests above. Setup serves each installed package's `web` directory;
 it does not read widget code from sibling checkouts.
