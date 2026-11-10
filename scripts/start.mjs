@@ -25,17 +25,18 @@ async function main() {
   let installed;
   try { installed = JSON.parse(await readFile(configPath, 'utf8')); }
   catch (cause) { throw new Error('Run the setup script first; .runtime/install.json could not be read.', { cause }); }
-  if (installed.schemaVersion !== 4) throw new Error('Outdated installation manifest; rerun setup to install the conversational widget.');
+  if (installed.schemaVersion !== 5) throw new Error('Outdated installation manifest; rerun setup to install the dechatter widget.');
   await access(resolve(installed.el400.mountPath, 'index.html'));
   await access(resolve(installed.pendant.mountPath, 'widget/index.html'));
   await access(resolve(installed.conversational.mountPath, 'index.html'));
+  await access(resolve(installed.dechatter.mountPath, 'index.html'));
   await mkdir(resolve(root, '.runtime'), { recursive: true });
   if (values.mode === 'simulator') {
     require('../simulator/register.cjs').install();
     console.log('SIMULATION: only the SIMULATOR port is available. No physical serial ports can be opened.');
   }
   console.log(`CNCjs ${values.mode}: http://localhost:${port}`);
-  console.log('Widgets: /whb04b/widget/index.html, /el400/?source=cncjs and /conversational/');
+  console.log('Widgets: /whb04b/widget/index.html, /el400/?source=cncjs, /conversational/ and /dechatter/');
   console.log('Select Grbl and open the desired port in CNCjs. Ctrl+C stops the server.');
   process.argv = [process.execPath, require.resolve('cncjs'),
     '--host', '127.0.0.1', '--port', port,
@@ -43,6 +44,7 @@ async function main() {
     '--mount', `/el400:${installed.el400.mountPath}`,
     '--mount', `/whb04b:${installed.pendant.mountPath}`,
     '--mount', `/conversational:${installed.conversational.mountPath}`,
+    '--mount', `/dechatter:${installed.dechatter.mountPath}`,
   ];
   await require('cncjs')();
 }
