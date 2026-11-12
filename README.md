@@ -83,9 +83,12 @@ npm start
    **Run**.
 
    The dechatter widget finds chatter-free spindle speeds, widths and depths of
-   cut. It plans test cuts, loads them into CNCjs and listens to them through
-   the computer's microphone, so the browser asks for microphone access. It
-   takes a few seconds to start: it runs Python in the browser tab.
+   cut. It plans test cuts and runs each round itself: press **Start** in the
+   widget, not **Run** in CNCjs. It sends one move at a time through CNCjs,
+   with **Hold**, **Resume** and **Stop** in the widget, and listens through
+   the computer's microphone, so the browser asks for microphone access. A
+   CNCjs job started during a round stops it. The widget takes a few seconds
+   to start: it runs Python in the browser tab.
 
    EL400's **Enter fullscreen** control below the readout requests browser
    fullscreen on a click; **Exit fullscreen** or Esc leaves it. This differs
