@@ -3,11 +3,13 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
+import { randomUUID } from 'node:crypto';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const require = createRequire(import.meta.url);
-const io = require('socket.io-client');
-const jwt = require('jsonwebtoken');
+// Resolve the client through CNCjs so it always matches the server's socket.io version.
+const cncRequire = createRequire(createRequire(import.meta.url).resolve('cncjs/package.json'));
+const io = cncRequire('socket.io-client');
+const jwt = cncRequire('jsonwebtoken');
 
 const USAGE = `Usage: node scripts/cnc.mjs <command> [args] [options]
 
@@ -19,7 +21,7 @@ Commands:
   watch                  Print status changes and controller output until Ctrl+C
   send <line>...         Send lines one at a time and print the replies
   unlock                 Clear an alarm ($X)
-  home [axes]            Home all axes ($H) or the given ones (home y -> $HY)
+  home [axes]            Home all axes ($H) or the given ones (home y, home x y)
   jog <axis><dist>...    Relative jog, e.g. "jog y-3 --in" or "jog x10 z-1"
   limits [seconds]       Sample $Limits (default 3 s) and decode the active pins
   stop                   Cancel jog and feed hold
@@ -41,17 +43,14 @@ Quote lines that start with $ in bash: send '$/axes/y' '$#'
 Ctrl+C during a jog cancels it; during homing it resets the controller.`;
 
 const QUIET_READ = /^<|^ok$|^\[GC:/;
+const REALTIME = new Set(['?', '!', '~', '\x18']);
+const CONNECT_TIMEOUT_MS = 5000;
 
-const { values: opts, positionals } = parseArgs({ allowPositionals: true, options: {
-  in: { type: 'boolean' },
-  feed: { type: 'string' },
-  serial: { type: 'string' },
-  baud: { type: 'string', default: '115200' },
-  mode: { type: 'string', default: 'machine' },
-  port: { type: 'string' },
-  verbose: { type: 'boolean', short: 'v' },
-  help: { type: 'boolean', short: 'h' },
-} });
+let opts;
+
+function isRealtime(data) {
+  return REALTIME.has(data) || /^[\x80-\xff]$/.test(data);
+}
 
 function formatAxes(pos) {
   if (!pos) return '-';
@@ -70,15 +69,47 @@ function sleep(ms) {
 class Machine {
   constructor(socket) {
     this.socket = socket;
+    this.id = randomUUID();
     this.serial = null;
     this.status = null;
     this.listeners = new Set();
     this.lastPrinted = '';
+    // Every line written to the controller by any client, oldest first. GRBL answers
+    // each line with exactly one ok/error, in order, so the head of this queue owns the
+    // next reply. Our own entries carry the callbacks that settle send().
+    this.inFlight = [];
+    this.ownUnsent = [];
     socket.on('controller:state', (type, state) => {
       this.status = state?.status ?? null;
       this.emit({ kind: 'state', status: this.status });
     });
-    socket.on('serialport:read', (line) => this.emit({ kind: 'read', line }));
+    socket.on('serialport:write', (data, context) => this.trackWrite(data, context));
+    socket.on('serialport:read', (line) => this.handleRead(line));
+    socket.on('disconnect', (reason) => {
+      const error = new Error(`Lost connection to CNCjs (${reason})`);
+      for (const entry of [...this.ownUnsent, ...this.inFlight]) entry.settle?.(error);
+      this.emit({ kind: 'disconnect', error });
+    });
+  }
+
+  trackWrite(data, context) {
+    for (const line of String(data).split('\n')) {
+      if (!line.trim() || isRealtime(line)) continue;
+      const own = context?.cncCliId === this.id ? this.ownUnsent.shift() : undefined;
+      this.inFlight.push(own ?? { line });
+    }
+  }
+
+  handleRead(line) {
+    if (/^ok$/.test(line)) this.inFlight.shift()?.settle?.();
+    else if (/^error/i.test(line)) {
+      const entry = this.inFlight.shift();
+      entry?.settle?.(new Error(`${entry.line} -> ${line}`));
+    } else if (/^ALARM/i.test(line)) {
+      // An alarm aborts whatever we are waiting on; the entry stays queued so a late reply still lines up.
+      for (const entry of this.inFlight) entry.settle?.(new Error(`${entry.line} -> ${line}`));
+    }
+    this.emit({ kind: 'read', line });
   }
 
   on(listener) {
@@ -90,16 +121,17 @@ class Machine {
     for (const listener of [...this.listeners]) listener(event);
   }
 
-  writeln(line) {
-    this.socket.emit('writeln', this.serial, line);
+  write(data) {
+    this.socket.emit('write', this.serial, data, { cncCliId: this.id });
   }
 
-  write(data) {
-    this.socket.emit('write', this.serial, data);
+  writeln(line) {
+    this.socket.emit('writeln', this.serial, line, { cncCliId: this.id });
   }
 
   printEvents() {
     return this.on((event) => {
+      if (event.kind === 'disconnect') return;
       if (event.kind === 'read') {
         if (opts.verbose || !QUIET_READ.test(event.line)) console.log(event.line);
         return;
@@ -111,15 +143,18 @@ class Machine {
     });
   }
 
-  // Resolves on "ok", rejects on "error:"/"ALARM:"; output in between is printed by printEvents.
+  // Resolves on the ok that answers this line, rejects on its error, an alarm, or a disconnect.
   send(line, timeoutMs = 10000) {
     return new Promise((done, fail) => {
-      const timer = setTimeout(() => { off(); fail(new Error(`No reply to ${line} within ${timeoutMs / 1000} s`)); }, timeoutMs);
-      const off = this.on((event) => {
-        if (event.kind !== 'read') return;
-        if (/^ok$/.test(event.line)) { clearTimeout(timer); off(); done(); return; }
-        if (/^(error|ALARM)/i.test(event.line)) { clearTimeout(timer); off(); fail(new Error(`${line} -> ${event.line}`)); }
-      });
+      const entry = { line };
+      const timer = setTimeout(() => entry.settle(new Error(`No reply to ${line} within ${timeoutMs / 1000} s`)), timeoutMs);
+      entry.settle = (error) => {
+        entry.settle = null;
+        clearTimeout(timer);
+        if (error) fail(error);
+        else done();
+      };
+      this.ownUnsent.push(entry);
       this.writeln(line);
     });
   }
@@ -128,18 +163,24 @@ class Machine {
   // Jog/Run is detected by a changed MPos, or by settling Idle with no change.
   waitMotionDone(start, timeoutMs) {
     const startPos = JSON.stringify(start?.mpos);
+    const startedInAlarm = start?.activeState === 'Alarm';
     return new Promise((done, fail) => {
       let sawActive = false;
       const check = () => {
         const status = this.status;
         if (!status) return;
-        if (status.activeState === 'Alarm') { finish(new Error('Controller entered Alarm')); return; }
+        if (status.activeState === 'Alarm') {
+          // A stale Alarm from before homing is not a failure; a new ALARM line is caught below.
+          if (!startedInAlarm || sawActive) finish(new Error('Controller entered Alarm'));
+          return;
+        }
         if (status.activeState !== 'Idle') { sawActive = true; return; }
-        if (sawActive || JSON.stringify(status.mpos) !== startPos) finish();
+        if (sawActive || startedInAlarm || JSON.stringify(status.mpos) !== startPos) finish();
       };
       const settle = setTimeout(() => { if (!sawActive && this.status?.activeState === 'Idle') finish(); }, 1500);
       const timer = setTimeout(() => finish(new Error(`Motion did not finish within ${timeoutMs / 1000} s`)), timeoutMs);
       const off = this.on((event) => {
+        if (event.kind === 'disconnect') { finish(event.error); return; }
         if (event.kind === 'read' && /^ALARM/i.test(event.line)) { finish(new Error(event.line)); return; }
         if (event.kind === 'state') check();
       });
@@ -164,28 +205,41 @@ async function connect() {
   const token = jwt.sign({ id: '', name: 'cnc-cli' }, config.secret, { expiresIn: '1d' });
   const socket = io.connect(`http://127.0.0.1:${httpPort}`, { query: `token=${token}`, reconnection: false });
   const machine = new Machine(socket);
-  const ports = await new Promise((done, fail) => {
-    socket.on('connect_error', (error) => fail(new Error(`Cannot reach CNCjs on port ${httpPort}: ${error.message}`)));
-    socket.on('startup', () => socket.emit('list'));
-    socket.on('serialport:list', done);
-  });
-  return { machine, socket, ports };
+  try {
+    const ports = await new Promise((done, fail) => {
+      const timer = setTimeout(() => fail(new Error(`No answer from CNCjs on port ${httpPort} within ${CONNECT_TIMEOUT_MS / 1000} s`)), CONNECT_TIMEOUT_MS);
+      const settle = (fn) => (value) => { clearTimeout(timer); fn(value); };
+      socket.on('connect_error', settle((error) => fail(new Error(`Cannot reach CNCjs on port ${httpPort}: ${error.message}`))));
+      // socket.io v2 reports a handshake rejected by CNCjs's auth middleware as "error".
+      socket.on('error', settle((error) => fail(new Error(
+        `CNCjs rejected the connection (${error?.message ?? error}). The token is signed with the secret in ${configPath}; `
+        + 'make sure that file belongs to the running server. CNCjs user accounts are not supported.'))));
+      socket.on('disconnect', settle((reason) => fail(new Error(`CNCjs closed the connection (${reason})`))));
+      socket.on('startup', () => socket.emit('list'));
+      socket.on('serialport:list', settle(done));
+    });
+    return { machine, socket, ports };
+  } catch (error) {
+    socket.close();
+    throw error;
+  }
 }
 
 function choosePort(ports, command) {
-  const requested = opts.serial && ports.find((p) => p.port.toLowerCase() === opts.serial.toLowerCase());
-  if (opts.serial && !requested) throw new Error(`Serial port ${opts.serial} not found. Ports: ${ports.map((p) => p.port).join(', ')}`);
-  const port = requested || ports.find((p) => p.inuse);
-  if (command === 'open') {
-    if (port) return port;
-    if (ports.length === 1) return ports[0];
-    throw new Error(`Several serial ports (${ports.map((p) => p.port).join(', ')}); pick one with --serial.`);
+  if (ports.length === 0) throw new Error('CNCjs lists no serial ports.');
+  const names = ports.map((p) => `${p.port}${p.inuse ? ' (open)' : ''}`).join(', ');
+  if (opts.serial) {
+    const port = ports.find((p) => p.port.toLowerCase() === opts.serial.toLowerCase());
+    if (!port) throw new Error(`Serial port ${opts.serial} not found. Ports: ${names}`);
+    if (command !== 'open' && !port.inuse) throw new Error(`${port.port} is not open in CNCjs. Open it in CNCjs or run "open" (resets the controller).`);
+    return port;
   }
-  if (!port?.inuse) {
-    const list = ports.map((p) => `${p.port}${p.inuse ? ' (open)' : ''}`).join(', ') || 'none';
-    throw new Error(`No serial port is open in CNCjs (ports: ${list}). Open it in CNCjs or run "open" (resets the controller).`);
-  }
-  return port;
+  const open = ports.filter((p) => p.inuse);
+  if (open.length > 1) throw new Error(`Several ports are open (${names}); pick one with --serial.`);
+  if (open.length === 1) return open[0];
+  if (command !== 'open') throw new Error(`No serial port is open in CNCjs (ports: ${names}). Open it in CNCjs or run "open" (resets the controller).`);
+  if (ports.length === 1) return ports[0];
+  throw new Error(`Several serial ports (${names}); pick one with --serial.`);
 }
 
 function join(machine, socket, port, options = {}) {
@@ -235,17 +289,20 @@ const commands = {
   async watch(machine) {
     console.log('Watching; Ctrl+C stops.');
     machine.printEvents();
-    await new Promise(() => {});
+    await new Promise((done, fail) => machine.on((event) => { if (event.kind === 'disconnect') fail(event.error); }));
   },
 
   async send(machine, args) {
     if (args.length === 0) throw new Error('send needs at least one line');
-    if (args.some((line) => /^\$limits/i.test(line))) throw new Error('Use the "limits" command; $Limits loops until "!".');
     machine.printEvents();
     for (const line of args) {
-      console.log(`> ${line}`);
+      if (/^\$limits/i.test(line)) throw new Error('Use the "limits" command; $Limits loops until "!".');
+      if (/^\$H/i.test(line)) throw new Error('Use the "home" command; $H runs longer than send waits.');
+      console.log(`> ${JSON.stringify(line).slice(1, -1)}`);
+      if (isRealtime(line)) { machine.write(line); continue; }
       await machine.send(line);
     }
+    await sleep(300);
   },
 
   async unlock(machine) {
@@ -256,14 +313,15 @@ const commands = {
   },
 
   async home(machine, args) {
-    const axes = (args[0] ?? '').toUpperCase();
-    if (!/^[XYZABC]*$/.test(axes)) throw new Error(`Bad axes "${args[0]}"; use e.g. "home" or "home y"`);
+    const axes = args.join('').toUpperCase();
+    if (!/^[XYZABC]*$/.test(axes)) throw new Error(`Bad axes "${args.join(' ')}"; use e.g. "home", "home y" or "home x y"`);
     requireState(machine, ['Idle', 'Alarm']);
+    const start = machine.status;
     machine.printEvents();
     interruptAction = () => { console.log('Interrupted: resetting controller'); machine.write('\x18'); };
     console.log(`> $H${axes}`);
     await machine.send(`$H${axes}`, 180000);
-    await machine.waitMotionDone(machine.status, 10000);
+    await machine.waitMotionDone(start, 10000);
   },
 
   async jog(machine, args) {
@@ -280,20 +338,34 @@ const commands = {
   async limits(machine, args) {
     const seconds = Number(args[0] ?? 3);
     if (!(seconds > 0)) throw new Error('limits takes a positive number of seconds');
+    requireState(machine, ['Idle', 'Alarm']);
     let last = '';
+    let looping = false;
+    const reply = machine.send('$Limits', (seconds + 5) * 1000);
     const off = machine.on((event) => {
-      if (event.kind !== 'read' || !event.line.startsWith(':')) return;
+      if (event.kind !== 'read') return;
+      if (!event.line.startsWith(':')) {
+        if (!QUIET_READ.test(event.line)) console.log(event.line);
+        return;
+      }
+      looping = true;
       const decoded = decodeLimits(event.line);
       if (decoded === last) return;
       last = decoded;
       console.log(decoded);
     });
-    interruptAction = () => machine.write('!');
-    machine.writeln('$Limits');
-    await sleep(seconds * 1000);
-    machine.write('!');
-    await sleep(800);
-    off();
+    try {
+      // "!" ends the loop, but outside it is a real feed hold: only send it once the loop is running.
+      interruptAction = () => { if (looping) machine.write('!'); };
+      const failed = await Promise.race([reply.then(() => 'ended', (error) => error), sleep(2000).then(() => null)]);
+      if (failed instanceof Error) throw failed;
+      if (!looping) throw new Error('No $Limits samples within 2 s; this controller may not support $Limits (FluidNC only).');
+      await sleep(seconds * 1000);
+      machine.write('!');
+      await reply;
+    } finally {
+      off();
+    }
   },
 
   async stop(machine) {
@@ -316,39 +388,57 @@ const commands = {
   },
 };
 
+async function openPort(machine, socket, port) {
+  if (port.inuse) {
+    await join(machine, socket, port.port);
+    console.log(`${port.port} is already open.`);
+    return;
+  }
+  const baudrate = Number(opts.baud);
+  if (!Number.isInteger(baudrate) || baudrate <= 0) throw new Error('--baud must be a positive integer.');
+  console.log(`Opening ${port.port}; this resets ESP32 controllers.`);
+  machine.printEvents();
+  await join(machine, socket, port.port, { controllerType: 'Grbl', baudrate });
+  await sleep(7000);
+  console.log(formatStatus(machine.status));
+}
+
 async function main() {
-  const [command, ...args] = positionals;
+  const parsed = parseArgs({ allowPositionals: true, options: {
+    in: { type: 'boolean' },
+    feed: { type: 'string' },
+    serial: { type: 'string' },
+    baud: { type: 'string', default: '115200' },
+    mode: { type: 'string', default: 'machine' },
+    port: { type: 'string' },
+    verbose: { type: 'boolean', short: 'v' },
+    help: { type: 'boolean', short: 'h' },
+  } });
+  opts = parsed.values;
+  const [command, ...args] = parsed.positionals;
   if (opts.help || !command) {
     console.log(USAGE);
     return;
   }
+  if (!['machine', 'simulator'].includes(opts.mode)) throw new Error('--mode must be machine or simulator.');
+  if (opts.port !== undefined && (!/^\d+$/.test(opts.port) || +opts.port < 1 || +opts.port > 65535)) throw new Error('--port must be an integer from 1 to 65535.');
   if (command !== 'open' && !commands[command]) throw new Error(`Unknown command "${command}". Run with --help.`);
   const { machine, socket, ports } = await connect();
   try {
     const port = choosePort(ports, command);
-    if (command !== 'open') {
-      await join(machine, socket, port.port);
-      await sleep(300);
-      await commands[command](machine, args);
+    if (command === 'open') {
+      await openPort(machine, socket, port);
       return;
     }
-    if (!port) throw new Error('No serial ports found.');
-    if (port.inuse) {
-      await join(machine, socket, port.port);
-      console.log(`${port.port} is already open.`);
-      return;
-    }
-    console.log(`Opening ${port.port}; this resets ESP32 controllers.`);
-    machine.printEvents();
-    await join(machine, socket, port.port, { controllerType: 'Grbl', baudrate: Number(opts.baud) });
-    await sleep(7000);
-    console.log(formatStatus(machine.status));
+    await join(machine, socket, port.port);
+    await sleep(300);
+    await commands[command](machine, args);
   } finally {
     socket.close();
   }
 }
 
 main().then(() => process.exit(0), (error) => {
-  console.error(`Error: ${error.message}`);
+  console.error(`Error: ${error.message}${error.code?.startsWith('ERR_PARSE_ARGS') ? ' Run with --help.' : ''}`);
   process.exit(1);
 });
