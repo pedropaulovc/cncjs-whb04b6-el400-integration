@@ -93,23 +93,38 @@ class Machine {
   }
 
   trackWrite(data, context) {
-    for (const line of String(data).split('\n')) {
-      if (!line.trim() || isRealtime(line)) continue;
+    const text = String(data);
+    if (text.includes('\x18')) {
+      this.resync(new Error('Controller was reset'));
+      return;
+    }
+    if (!text.endsWith('\n')) return; // realtime byte or partial raw write: no reply expected
+    // The controller acknowledges every line, blank ones included (FluidNC execute_line: "For syncing purposes").
+    for (const line of text.slice(0, -1).split('\n')) {
       const own = context?.cncCliId === this.id ? this.ownUnsent.shift() : undefined;
       this.inFlight.push(own ?? { line });
     }
   }
 
+  // A reset or alarm flushes the controller's receive buffer, so queued lines never get a reply.
+  resync(error) {
+    const lost = this.inFlight;
+    this.inFlight = [];
+    for (const entry of lost) entry.settle?.(new Error(`${entry.line} -> ${error.message}`));
+  }
+
   handleRead(line) {
-    if (/^ok$/.test(line)) this.inFlight.shift()?.settle?.();
-    else if (/^error/i.test(line)) {
+    this.emit({ kind: 'read', line });
+    if (/^ok$/.test(line)) {
+      this.inFlight.shift()?.settle?.();
+      return;
+    }
+    if (/^error/i.test(line)) {
       const entry = this.inFlight.shift();
       entry?.settle?.(new Error(`${entry.line} -> ${line}`));
-    } else if (/^ALARM/i.test(line)) {
-      // An alarm aborts whatever we are waiting on; the entry stays queued so a late reply still lines up.
-      for (const entry of this.inFlight) entry.settle?.(new Error(`${entry.line} -> ${line}`));
+      return;
     }
-    this.emit({ kind: 'read', line });
+    if (/^ALARM/i.test(line) || /^Grbl \d/.test(line)) this.resync(new Error(line));
   }
 
   on(listener) {
@@ -151,8 +166,8 @@ class Machine {
       entry.settle = (error) => {
         entry.settle = null;
         clearTimeout(timer);
-        if (error) fail(error);
-        else done();
+        if (error) return fail(error);
+        done();
       };
       this.ownUnsent.push(entry);
       this.writeln(line);
@@ -294,15 +309,18 @@ const commands = {
 
   async send(machine, args) {
     if (args.length === 0) throw new Error('send needs at least one line');
+    if (args.some((line) => /^\$limits/i.test(line))) throw new Error('Use the "limits" command; $Limits loops until "!".');
+    if (args.some((line) => /^\$H[XYZABC]*$/i.test(line))) throw new Error('Use the "home" command; $H runs longer than send waits.');
+    // During a CNCjs program run, CNCjs consumes every ok for its own sender, so replies cannot be matched.
+    if (args.some((line) => !isRealtime(line))) requireState(machine, ['Idle', 'Alarm', 'Jog', 'Check', 'Sleep'], 'Wait for the program to finish.');
     machine.printEvents();
     for (const line of args) {
-      if (/^\$limits/i.test(line)) throw new Error('Use the "limits" command; $Limits loops until "!".');
-      if (/^\$H/i.test(line)) throw new Error('Use the "home" command; $H runs longer than send waits.');
       console.log(`> ${JSON.stringify(line).slice(1, -1)}`);
       if (isRealtime(line)) { machine.write(line); continue; }
       await machine.send(line);
     }
     await sleep(300);
+    if (args.includes('?')) console.log(formatStatus(machine.status));
   },
 
   async unlock(machine) {
@@ -340,8 +358,12 @@ const commands = {
     if (!(seconds > 0)) throw new Error('limits takes a positive number of seconds');
     requireState(machine, ['Idle', 'Alarm']);
     let last = '';
+    let replyState = 'pending';
     let looping = false;
+    let markSampling;
+    const sampling = new Promise((done) => { markSampling = done; });
     const reply = machine.send('$Limits', (seconds + 5) * 1000);
+    const replyDone = reply.then(() => { replyState = 'ok'; return 'ended'; }, (error) => { replyState = 'failed'; return error; });
     const off = machine.on((event) => {
       if (event.kind !== 'read') return;
       if (!event.line.startsWith(':')) {
@@ -349,19 +371,22 @@ const commands = {
         return;
       }
       looping = true;
+      markSampling();
       const decoded = decodeLimits(event.line);
       if (decoded === last) return;
       last = decoded;
       console.log(decoded);
     });
+    // "!" ends the loop, but outside it is a real feed hold: send it only while the loop is still running.
+    const endLoop = () => { if (looping && replyState === 'pending') machine.write('!'); };
+    interruptAction = endLoop;
     try {
-      // "!" ends the loop, but outside it is a real feed hold: only send it once the loop is running.
-      interruptAction = () => { if (looping) machine.write('!'); };
-      const failed = await Promise.race([reply.then(() => 'ended', (error) => error), sleep(2000).then(() => null)]);
-      if (failed instanceof Error) throw failed;
-      if (!looping) throw new Error('No $Limits samples within 2 s; this controller may not support $Limits (FluidNC only).');
-      await sleep(seconds * 1000);
-      machine.write('!');
+      const first = await Promise.race([sampling.then(() => 'sampling'), replyDone, sleep(2000).then(() => 'silent')]);
+      if (first instanceof Error) throw first;
+      if (first === 'ended') throw new Error('$Limits ended before sampling (another client sent "!"?).');
+      if (first === 'silent') throw new Error('No $Limits samples within 2 s; this controller may not support $Limits (FluidNC only). If it is looping silently, end it with: send "!"');
+      await Promise.race([sleep(seconds * 1000), replyDone]);
+      endLoop();
       await reply;
     } finally {
       off();
