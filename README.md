@@ -271,6 +271,29 @@ It therefore cannot detect missed steps, backlash, or a stalled axis. Its local
 datum/display features can differ from CNCjs's G54 work coordinates; confirm the
 coordinate system before returning to a programmed move.
 
+### Command line
+
+With the machine server running and the port open in CNCjs, `npm run cnc --`
+(or `node scripts/cnc.mjs`) sends commands without the browser console. It joins
+the already-open port, so ESP32/FluidNC controllers are not reset, and prints
+status changes (state, MPos, WPos, active limit pins) while motion runs.
+
+```sh
+node scripts/cnc.mjs state                # one status line
+node scripts/cnc.mjs unlock               # $X
+node scripts/cnc.mjs jog y-3 --in         # $J=G20 G91 Y-3 F20, waits for Idle
+node scripts/cnc.mjs jog x10 z-1 --feed 300
+node scripts/cnc.mjs home y               # $HY; "home" alone runs $H
+node scripts/cnc.mjs limits               # decode $Limits for 3 s, then "!"
+node scripts/cnc.mjs send '$/axes/y' '$#' # raw lines; quote $ in bash
+node scripts/cnc.mjs watch                # follow status and output
+```
+
+Jog and home refuse to start unless the controller is in the expected state and
+stop on any `ALARM` or `error`. Ctrl+C cancels a jog (`0x85`) or resets the
+controller during homing. `open` opens a closed port, which resets ESP32
+controllers. `--help` lists all commands and options.
+
 ## Configuration and troubleshooting
 
 ```sh
