@@ -10,6 +10,11 @@ import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { chromium, expect } from '@playwright/test';
 
+// expect.poll backs off to 100, 250, 500 and then 1000 ms between checks, so a
+// condition met just after a check waits up to a second for the next one.
+// CNCjs broadcasts status every 250 ms; check every 50 ms instead.
+const poll = (callback, options) => expect.poll(callback, { intervals: [50], ...options });
+
 // Use the client shipped with the pinned CNCjs server so protocol versions agree.
 const require = createRequire(import.meta.url);
 const cncRequire = createRequire(require.resolve('cncjs/package.json'));
@@ -146,14 +151,14 @@ async function withRealWidgets(t, scenario) {
   const inches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
   await inches;
-  await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe('G20');
+  await poll(() => pendant.state.parserstate?.modal?.units).toBe('G20');
   const moved = event(socket, 'controller:state', (_, state) => Number(state.status?.mpos?.x) === 5 && state.status.activeState === 'Idle');
   assert.equal(new Grbl(pendant, message => t.diagnostic(message)).jog('X', 5, 750), 'sent');
   await moved;
   const zeroed = event(socket, 'controller:state', (_, state) => Number(state.status?.wpos?.x) === 0 && Number(state.status?.mpos?.x) === 5);
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X0');
   await zeroed;
-  await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe('G21');
+  await poll(() => pendant.state.parserstate?.modal?.units).toBe('G21');
   const rejected = await new Promise(resolve => socket.emit('open', 'COM1', { controllerType: 'Grbl', baudrate: 115200 }, resolve));
   assert.ok(rejected, 'Simulation must reject hardware even when directly requested');
 
@@ -264,7 +269,7 @@ async function withRealWidgets(t, scenario) {
     if (chunks.some(chunk => chunk.reportId !== 6 || chunk.bytes.length !== 7)) throw new Error('Invalid LCD feature report framing');
     return chunks.flatMap(chunk => chunk.bytes);
   });
-  await expect.poll(async () => (await lcdFrame())?.slice(0, 3)).toEqual([0xfe, 0xfd, 0xfe]);
+  await poll(async () => (await lcdFrame())?.slice(0, 3)).toEqual([0xfe, 0xfd, 0xfe]);
   const droFrame = page.frameLocator('iframe[name="dro"]');
   // CNCjs parser units are authoritative, not EL400's standalone inch default.
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000', { timeout: 10000 });
@@ -301,7 +306,7 @@ async function withRealWidgets(t, scenario) {
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   // LinuxCNC's packed LCD report: FE FD FE, relative+Step flags, integer/fraction
   // coordinate pairs, then 16-bit feed/spindle override percentages.
-  await expect.poll(lcdFrame).toEqual([
+  await poll(lcdFrame).toEqual([
     0xfe, 0xfd, 0xfe, 0x81,
     5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     100, 0, 100, 0, 0,
@@ -320,8 +325,8 @@ async function withRealWidgets(t, scenario) {
   const stepWriteStart = writes.length;
   const axisMaxFeed = Number(pendant.settings.settings.$110).toFixed(3);
   await startupWheel(4);
-  await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10.04);
-  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  await poll(() => Number(latestState.status?.mpos?.x)).toBe(10.04);
+  await poll(() => latestState.status.activeState).toBe('Idle');
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0400');
   assert.equal(latestState.status.ov[0], 100, 'Startup Step must not adjust feed override');
   assert.ok(writes.slice(stepWriteStart).some(line => line.trim() === `$J=G21 G91 X0.0400 F${axisMaxFeed}`),
@@ -329,27 +334,27 @@ async function withRealWidgets(t, scenario) {
   const stepOverride = new Grbl(pendant);
   t.after(() => stepOverride.clearOverrides());
   assert.equal(stepOverride.overrideTarget('feed', 50), 'sent');
-  await expect.poll(() => latestState.status.ov[0]).toBe(50);
-  await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
+  await poll(() => latestState.status.ov[0]).toBe(50);
+  await poll(() => stepOverride.pendingOverrides.size).toBe(0);
   const reducedOverrideWrites = writes.length;
   await startupWheel(-4);
-  await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
-  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  await poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
+  await poll(() => latestState.status.activeState).toBe('Idle');
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   assert.ok(writes.slice(reducedOverrideWrites).some(line => line.trim() === `$J=G21 G91 X-0.0400 F${axisMaxFeed}`),
     'Program Feed % must not change LinuxCNC-style Step speed');
   assert.equal(stepOverride.overrideTarget('feed', 100), 'sent');
-  await expect.poll(() => latestState.status.ov[0]).toBe(100);
-  await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
+  await poll(() => latestState.status.ov[0]).toBe(100);
+  await poll(() => stepOverride.pendingOverrides.size).toBe(0);
   // The printed .1 selector follows program units, not GRBL's $13 report units.
   // Reuse this server and HID receiver; every phase finishes before changing units.
   assert.equal(Number(pendant.settings.settings.$13), 0);
   const readProgramUnits = async units => {
     // CNCjs consumes routine [GC:] replies; use its native parser-state contract.
     socket.emit('command', 'SIMULATOR', 'gcode', '$G');
-    await expect.poll(() => latestState.parserstate?.modal?.units).toBe(units);
-    await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe(units);
-    await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
+    await poll(() => latestState.parserstate?.modal?.units).toBe(units);
+    await poll(() => pendant.state.parserstate?.modal?.units).toBe(units);
+    await poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
       window.testControllerState?.parserstate?.modal?.units)).toBe(units);
   };
   for (const [units, scale, label, feedResolution] of [
@@ -359,12 +364,12 @@ async function withRealWidgets(t, scenario) {
     await readProgramUnits(units);
     await startupWheel(0, 0x0f);
     assert.equal(stepOverride.overrideTarget('feed', 50), 'sent');
-    await expect.poll(() => latestState.status.ov[0]).toBe(50);
-    await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
+    await poll(() => latestState.status.ov[0]).toBe(50);
+    await poll(() => stepOverride.pendingOverrides.size).toBe(0);
     for (const direction of [1, -1]) {
       const unitStepStart = writes.length;
       await startupWheel(direction, 0x0f);
-      await expect.poll(() => ({
+      await poll(() => ({
         x: Number(latestState.status?.mpos?.x), state: latestState.status.activeState,
         units: latestState.parserstate?.modal?.units,
       })).toEqual({ x: direction === 1 ? 10 + 0.1 * scale : 10, state: 'Idle', units });
@@ -385,8 +390,8 @@ async function withRealWidgets(t, scenario) {
   }
   await startupWheel(0);
   assert.equal(stepOverride.overrideTarget('feed', 100), 'sent');
-  await expect.poll(() => latestState.status.ov[0]).toBe(100);
-  await expect.poll(() => stepOverride.pendingOverrides.size).toBe(0);
+  await poll(() => latestState.status.ov[0]).toBe(100);
+  await poll(() => stepOverride.pendingOverrides.size).toBe(0);
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   // INC has its own datum; zeroing it must not change CNCjs WPos.
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
@@ -413,8 +418,8 @@ async function withRealWidgets(t, scenario) {
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   // Restore the original physical work offset for the unchanged LCD/Step checks.
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X5');
-  await expect.poll(() => Number(latestState.status.wpos.x)).toBe(5);
-  await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
+  await poll(() => Number(latestState.status.wpos.x)).toBe(5);
+  await poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
     Number(window.testControllerState?.status?.wpos?.x))).toBe(5);
   // CNCjs already reports progress: ordinary queued jogs must not add console
   // status queries. Exercise the reported +7/-1 sequence against the real server.
@@ -423,33 +428,33 @@ async function withRealWidgets(t, scenario) {
   const queryStart = writes.length;
   assert.equal(nativeJog.jog('X', 7, 250), 'sent');
   assert.equal(nativeJog.jog('X', -1, 250), 'buffered');
-  await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(16);
-  await expect.poll(() => nativeJog.jogPhase).toBe('idle');
+  await poll(() => Number(latestState.status?.mpos?.x)).toBe(16);
+  await poll(() => nativeJog.jogPhase).toBe('idle');
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('11.0000');
   assert.deepEqual(writes.slice(queryStart).filter(line => line.trim() === '?'), [],
     'Native CNCjs progress must complete a normal queued jog without pendant status polling');
   assert.equal(nativeJog.jog('X', -6, 750), 'sent');
-  await expect.poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
-  await expect.poll(() => nativeJog.jogPhase).toBe('idle');
+  await poll(() => Number(latestState.status?.mpos?.x)).toBe(10);
+  await poll(() => nativeJog.jogPhase).toBe('idle');
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   const displayInches = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
   await displayInches;
   // GRBL still reports millimetres ($13=0); the LCD must show 5/25.4 = 0.1969 in.
-  await expect.poll(async () => (await lcdFrame())?.slice(4, 8)).toEqual([0, 0, 177, 7]);
+  await poll(async () => (await lcdFrame())?.slice(4, 8)).toEqual([0, 0, 177, 7]);
   const displayMillimetres = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
   await displayMillimetres;
-  await expect.poll(async () => (await lcdFrame())?.slice(4, 8)).toEqual([5, 0, 0, 0]);
+  await poll(async () => (await lcdFrame())?.slice(4, 8)).toEqual([5, 0, 0, 0]);
   const toggleLcdCoordinates = () => page.frame({ name: 'pendant' }).evaluate(() => {
     for (const key of [0x10, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
       detail: { firstKeyCode: key, secondKeyCode: 0, leftDialCode: 0x11, rightDialCode: 0x0f, jog: 0 },
     }));
   });
   await toggleLcdCoordinates();
-  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x01, 10, 0, 0, 0]);
+  await poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x01, 10, 0, 0, 0]);
   await toggleLcdCoordinates();
-  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x81, 5, 0, 0, 0]);
+  await poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x81, 5, 0, 0, 0]);
   const hidEvent = type => page.frame({ name: 'pendant' }).evaluate(type => {
     const event = new Event(type);
     Object.defineProperty(event, 'device', { value: window.testHidDevice });
@@ -462,7 +467,7 @@ async function withRealWidgets(t, scenario) {
   assert.equal(await page.frame({ name: 'pendant' }).evaluate(() => window.testLcdReports.length), 0,
     'Disconnected receiver must not receive even a partial LCD frame');
   await hidEvent('connect');
-  await expect.poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x81, 5, 0, 0, 0]);
+  await poll(async () => (await lcdFrame())?.slice(3, 8)).toEqual([0x81, 5, 0, 0, 0]);
   assert.deepEqual(browserErrors, [], 'Mounted widgets must boot without browser errors');
   const widgetJogging = event(socket, 'controller:state', (_, state) => state.status?.activeState === 'Jog');
   assert.equal(new Grbl(pendant, message => t.diagnostic(message)).jog('X', 10, 50), 'sent');
@@ -484,12 +489,12 @@ async function withRealWidgets(t, scenario) {
   controls.stop();
   const [, stoppedState] = await stopped;
   assert.ok(Number(stoppedState.status.mpos.x) < 20, 'Stop must cancel before the jog target');
-  await expect.poll(() => pendant.stopPhase).toBe('idle');
+  await poll(() => pendant.stopPhase).toBe('idle');
   const idleReplies = [];
   const recordIdle = line => idleReplies.push(line);
   socket.on('serialport:read', recordIdle);
   controls.stop();
-  await expect.poll(() => pendant.stopPhase).toBe('idle');
+  await poll(() => pendant.stopPhase).toBe('idle');
   socket.off('serialport:read', recordIdle);
   assert.ok(idleReplies.some(line => line.startsWith('<Idle|')));
   assert.ok(idleReplies.filter(line => line.startsWith('<')).every(line => line.startsWith('<Idle|')),
@@ -509,7 +514,7 @@ async function withRealWidgets(t, scenario) {
   const workflowStopped = event(socket, 'workflow:state', state => state === 'idle', 3000);
   controls.stop();
   await Promise.all([reset, cancelled, workflowStopped]).catch(error => { throw new Error(`${error.message}; recent GRBL replies: ${JSON.stringify(serialTrace)}; server: ${output}`); });
-  await expect.poll(() => pendant.stopPhase).toBe('idle');
+  await poll(() => pendant.stopPhase).toBe('idle');
   pendant.command('cyclestart');
   // Confirm twice to exclude one status reply already in flight before Start.
   for (let report = 0; report < 2; report++) {
@@ -529,7 +534,7 @@ async function withRealWidgets(t, scenario) {
   const dwellWorkflowStopped = event(socket, 'workflow:state', state => state === 'idle', 3000);
   controls.stop();
   await Promise.all([dwellReset, dwellWorkflowStopped]);
-  await expect.poll(() => pendant.stopPhase).toBe('idle');
+  await poll(() => pendant.stopPhase).toBe('idle');
   pendant.command('cyclestart');
   for (let report = 0; report < 2; report++) {
     const afterDwellStart = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
@@ -543,10 +548,15 @@ async function withRealWidgets(t, scenario) {
   socket.emit('command', 'SIMULATOR', 'gcode', 'G4 P1\nG91 G1 X10 F50');
   await mdiDwellSent;
   controls.stop();
-  await expect.poll(() => pendant.stopPhase).toBe('idle');
+  await poll(() => pendant.stopPhase).toBe('idle');
   // Observing G20 establishes that GRBL processed commands after the dwell.
+  // Ask for $G with it: the soft resets above can discard CNCjs's own in-flight
+  // $G, and CNCjs then waits up to 10 s before polling parser state again.
+  // $G must stay last: CNCjs 1.11.5 answers its ok on the parser-state path
+  // without feeder.next(), so a line after it would never be sent and would
+  // block later feeder commands.
   const mdiDrained = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
-  pendant.command('gcode', 'G20');
+  pendant.command('gcode', ['G20', '$G']);
   await mdiDrained;
   for (let report = 0; report < 2; report++) {
     const mdiStatus = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
@@ -574,26 +584,26 @@ async function withRealWidgets(t, scenario) {
     assert.match((await status)[0], /^<Idle\|/);
   }
   await Promise.all([
-    expect.poll(() => pendant.reportSequence, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(issuedSequence + 2),
-    expect.poll(() => feederState?.queue, { intervals: [50], timeout: 2000 }).toBeGreaterThanOrEqual(2),
+    poll(() => pendant.reportSequence, { timeout: 2000 }).toBeGreaterThanOrEqual(issuedSequence + 2),
+    poll(() => feederState?.queue, { timeout: 2000 }).toBeGreaterThanOrEqual(2),
   ]);
   assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Regression setup must leave the jog queued behind the dwell');
   assert.equal(queuedJog.jogCompleted(), false, 'Idle before queued jog acknowledgements must not complete the jog');
   const cancelWrite = event(socket, 'serialport:write', line => line.includes('\x85'));
   queuedJog.cancelJog();
   await cancelWrite;
-  await expect.poll(() => queuedJog.jogPhase).toBe('idle');
+  await poll(() => queuedJog.jogPhase).toBe('idle');
   // A subsequent acknowledged modal command proves the dwell/feeder drained.
   const queuedDrained = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
   pendant.command('gcode', 'G21');
   await queuedDrained;
   // Socket.IO clients receive modal broadcasts independently.
-  await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe('G21');
+  await poll(() => pendant.state.parserstate?.modal?.units).toBe('G21');
   assert.ok(!writes.slice(writeStart).some(line => line.startsWith('$J=')), 'Canceled queued jogs must never be sent');
   const completedWrites = writes.length;
   assert.equal(queuedJog.jog('X', 0.04, 250), 'sent');
   assert.equal(queuedJog.jog('X', -0.04, 250), 'buffered');
-  await expect.poll(() => queuedJog.jogPhase).toBe('idle');
+  await poll(() => queuedJog.jogPhase).toBe('idle');
   assert.deepEqual(writes.slice(completedWrites).filter(line => line.startsWith('$J=')).map(line => line.trim()),
     ['$J=G21 G91 X0.0400 F250.000', '$J=G21 G91 X-0.0400 F250.000'],
     'An acknowledged out-and-back pair must finish without leaving the pendant locked');
@@ -602,13 +612,13 @@ async function withRealWidgets(t, scenario) {
   const lateSession = new CncjsSession({ io, origin: base });
   t.after(() => lateSession.disconnect());
   lateSession.connect(token);
-  await expect.poll(() => lateSession.status.phase).toBe('joined');
-  await expect.poll(() => lateSession.state.parserstate?.modal?.units).toBe('G21');
+  await poll(() => lateSession.status.phase).toBe('joined');
+  await poll(() => lateSession.state.parserstate?.modal?.units).toBe('G21');
   const uncertainJog = new Grbl(lateSession, message => t.diagnostic(message));
   t.after(() => uncertainJog.clearJog());
   assert.equal(uncertainJog.jog('X', 0.001, 250), 'sent');
-  await expect.poll(() => uncertainJog.jogReceipt?.state).toBe('uncertain');
-  await expect.poll(() => uncertainJog.jogTimer).toBe(null);
+  await poll(() => uncertainJog.jogReceipt?.state).toBe('uncertain');
+  await poll(() => uncertainJog.jogTimer).toBe(null);
   assert.equal(uncertainJog.jogPhase, 'armed', 'Ambiguous motion must retain cancellation ownership');
   assert.equal(uncertainJog.jogCompleted(), false, 'Unknown history must not manufacture completion');
   const laterDwell = event(socket, 'serialport:write', line => line.includes('G4 P1'));
@@ -618,7 +628,7 @@ async function withRealWidgets(t, scenario) {
   const passiveCancel = event(socket, 'serialport:write', line => line.includes('\x85'));
   uncertainJog.cancelJog();
   await Promise.all([laterMacro, passiveCancel]);
-  await expect.poll(() => uncertainJog.jogPhase).toBe('idle');
+  await poll(() => uncertainJog.jogPhase).toBe('idle');
   lateSession.disconnect();
   const restoredUnits = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
   pendant.command('gcode', 'G21');
@@ -632,7 +642,7 @@ async function withRealWidgets(t, scenario) {
   };
   const press = async (code, modifier = 0, rightDialCode = 0x0f) => {
     const expectedParser = structuredClone(latestState.parserstate);
-    await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() => window.testControllerState?.parserstate))
+    await poll(() => page.frame({ name: 'pendant' }).evaluate(() => window.testControllerState?.parserstate))
       .toEqual(expectedParser);
     await report({ firstKeyCode: code, secondKeyCode: modifier, rightDialCode });
     await report({ rightDialCode });
@@ -643,84 +653,84 @@ async function withRealWidgets(t, scenario) {
   // Leaving Lead selects MPG; startup now selects Step instead.
   await report({ rightDialCode: 0x9b });
   await report({ rightDialCode: 0x1b });
-  await expect.poll(() => latestState.status.ov?.[0]).toBe(100);
+  await poll(() => latestState.status.ov?.[0]).toBe(100);
   await report({ rightDialCode: 0x1b, jog: -2 });
-  await expect.poll(() => latestState.status.ov?.[0]).toBe(98);
+  await poll(() => latestState.status.ov?.[0]).toBe(98);
   await report({ rightDialCode: 0x9b, jog: 3 });
-  await expect.poll(() => latestState.status.ov?.[2]).toBe(103);
+  await poll(() => latestState.status.ov?.[2]).toBe(103);
   assert.deepEqual(getPosition(), stationary, 'Lead must adjust spindle override without jogging');
   await report({ rightDialCode: 0x1b });
-  await expect.poll(() => latestState.status.ov?.[0]).toBe(100);
+  await poll(() => latestState.status.ov?.[0]).toBe(100);
   await report({ rightDialCode: 0x1b, jog: -2 });
-  await expect.poll(() => latestState.status.ov?.[0]).toBe(98);
+  await poll(() => latestState.status.ov?.[0]).toBe(98);
   assert.deepEqual(getPosition(), stationary, 'Returning from Lead must select MPG feed override');
   await press(0x04, 0, 0x1b);
-  await expect.poll(() => latestState.status.ov?.[0]).toBe(99);
+  await poll(() => latestState.status.ov?.[0]).toBe(99);
 
   const spindlePrepared = event(socket, 'controller:state', (_, state) => Number(state.parserstate?.spindle) === 500);
   pendant.command('gcode', 'S500');
   await spindlePrepared;
   await press(0x0b, 0, 0x1b);
-  await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M3').catch(async error => {
+  await poll(() => latestState.parserstate?.modal?.spindle).toBe('M3').catch(async error => {
     t.diagnostic(JSON.stringify(await page.frame({ name: 'pendant' }).evaluate(() => ({
       controller: window.testControllerState,
       log: document.querySelector('#log').textContent,
     }))));
     throw error;
   });
-  await expect.poll(() => Number(latestState.status.spindle)).toBe(515);
+  await poll(() => Number(latestState.status.spindle)).toBe(515);
   await press(0x07, 0, 0x1b);
-  await expect.poll(() => latestState.status.ov?.[2]).toBe(102);
-  await expect.poll(() => Number(latestState.status.spindle)).toBe(510);
-  await expect.poll(async () => (await lcdFrame())?.slice(16, 20)).toEqual([99, 0, 102, 0]);
+  await poll(() => latestState.status.ov?.[2]).toBe(102);
+  await poll(() => Number(latestState.status.spindle)).toBe(510);
+  await poll(async () => (await lcdFrame())?.slice(16, 20)).toEqual([99, 0, 102, 0]);
   await press(0x0b, 0, 0x1b);
-  await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M5');
+  await poll(() => latestState.parserstate?.modal?.spindle).toBe('M5');
   await press(0x06, 0x0c, 0x1b); // Fn + Spindle+: programmed RPM.
-  await expect.poll(() => Number(latestState.parserstate?.spindle)).toBe(600);
+  await poll(() => Number(latestState.parserstate?.spindle)).toBe(600);
   await press(0x0b, 0x0c, 0x1b); // Fn + spindle: next start direction.
   await press(0x0b, 0, 0x1b);
-  await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M4');
+  await poll(() => latestState.parserstate?.modal?.spindle).toBe('M4');
   await press(0x0b, 0, 0x1b);
-  await expect.poll(() => latestState.parserstate?.modal?.spindle).toBe('M5');
+  await poll(() => latestState.parserstate?.modal?.spindle).toBe('M5');
   await press(0x0e, 0x0c, 0x1b); // Fn + Continuous: flood coolant.
-  await expect.poll(() => latestState.parserstate?.modal?.coolant).toBe('M8');
+  await poll(() => latestState.parserstate?.modal?.coolant).toBe('M8');
   await press(0x0f, 0x0c, 0x1b); // Fn + Step: mist coolant.
-  await expect.poll(() => latestState.parserstate?.modal?.coolant).toEqual(['M7', 'M8']);
+  await poll(() => latestState.parserstate?.modal?.coolant).toEqual(['M7', 'M8']);
   await press(0x0e, 0x0c, 0x1b);
-  await expect.poll(() => latestState.parserstate?.modal?.coolant).toBe('M7');
+  await poll(() => latestState.parserstate?.modal?.coolant).toBe('M7');
   await press(0x0f, 0x0c, 0x1b);
-  await expect.poll(() => latestState.parserstate?.modal?.coolant).toBe('M9');
+  await poll(() => latestState.parserstate?.modal?.coolant).toBe('M9');
 
   await press(0x0f, 0, 0x0e); // Step, 0.01 mm per detent.
-  await expect.poll(async () => (await lcdFrame())?.[3]).toBe(0x81);
+  await poll(async () => (await lcdFrame())?.[3]).toBe(0x81);
   await report({ rightDialCode: 0x0e, jog: 4 });
-  await expect.poll(() => Number(latestState.status.mpos.x)).toBeCloseTo(stationary[0] + 0.04, 3);
-  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  await poll(() => Number(latestState.status.mpos.x)).toBeCloseTo(stationary[0] + 0.04, 3);
+  await poll(() => latestState.status.activeState).toBe('Idle');
   // CNCjs's automatic status broadcasts must suffice; the test sends no extra
   // raw status requests to make the pendant's cancellation guard recover.
   await report({ leftDialCode: 0x12, rightDialCode: 0x0e, jog: 4 });
-  await expect.poll(() => Number(latestState.status.mpos.y)).toBeCloseTo(stationary[1] + 0.04, 3);
-  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  await poll(() => Number(latestState.status.mpos.y)).toBeCloseTo(stationary[1] + 0.04, 3);
+  await poll(() => latestState.status.activeState).toBe('Idle');
   const stepped = getPosition();
   await press(0x0e, 0, 0x0d); // Continuous at 2% of the controller maximum.
   const beforeContinuous = writes.length;
   await report({ rightDialCode: 0x0d, jog: 1 });
   // A short jog can finish between CNCjs status polls; verify actual travel.
-  await expect.poll(() => Number(latestState.status.mpos.x)).toBeGreaterThan(stepped[0]).catch(async error => {
+  await poll(() => Number(latestState.status.mpos.x)).toBeGreaterThan(stepped[0]).catch(async error => {
     throw new Error(`${error.message}; pendant log: ${await pendantFrame.locator('#log').textContent()}; recent status: ${JSON.stringify(serialTrace)}`);
   });
-  await expect.poll(() => latestState.status.activeState).toBe('Idle');
-  await expect.poll(() => writes.slice(beforeContinuous).some(line => line.includes('\x85'))).toBe(true);
+  await poll(() => latestState.status.activeState).toBe('Idle');
+  await poll(() => writes.slice(beforeContinuous).some(line => line.includes('\x85'))).toBe(true);
   assert.ok(writes.slice(beforeContinuous).some(line => /\$J=.*F60(?:\.000)?\b/.test(line)), 'Continuous must use 2% of the X maximum, 60 mm/min');
   const continuousDistance = Number(latestState.status.mpos.x) - stepped[0];
   assert.ok(continuousDistance > 0 && continuousDistance < 1, `Continuous jog must stop after wheel inactivity, moved ${continuousDistance} mm`);
   await expect(pendantFrame.locator('#log')).toContainText('GRBL override minimum is 10%');
-  await expect.poll(() => latestState.status.ov?.[0], { timeout: 10000 }).toBe(10);
+  await poll(() => latestState.status.ov?.[0], { timeout: 10000 }).toBe(10);
   const beforeUnsupportedAxis = writes.length;
   const beforeUnsupportedPosition = getPosition();
   await report({ leftDialCode: 0x14, rightDialCode: 0x0d, jog: 5 });
   await expect(pendantFrame.locator('#log')).toContainText('GRBL supports XYZ; A/B/C wheel input ignored.');
-  await expect.poll(lcdFrame).toEqual([0xfe, 0xfd, 0xfe, 0x40, ...Array(17).fill(0)]);
+  await poll(lcdFrame).toEqual([0xfe, 0xfd, 0xfe, 0x40, ...Array(17).fill(0)]);
   for (let confirmation = 0; confirmation < 2; confirmation++) {
     const status = event(socket, 'serialport:read', line => line.startsWith('<'));
     pendant.command('statusreport');
@@ -734,28 +744,28 @@ async function withRealWidgets(t, scenario) {
   socket.emit('command', 'SIMULATOR', 'gcode:load', 'pause-resume.nc', ['G21 G91', ...Array(80).fill('G1 X0.5 F300')].join('\n'));
   await pauseLoaded;
   await press(0x03, 0, 0x0d);
-  await expect.poll(() => workflowState).toBe('running');
-  await expect.poll(() => latestState.status.activeState).toBe('Run');
+  await poll(() => workflowState).toBe('running');
+  await poll(() => latestState.status.activeState).toBe('Run');
   await press(0x03, 0, 0x0d);
-  await expect.poll(() => workflowState).toBe('paused');
-  await expect.poll(() => latestState.status.activeState).toBe('Hold');
+  await poll(() => workflowState).toBe('paused');
+  await poll(() => latestState.status.activeState).toBe('Hold');
   const sentBeforeResume = senderState.sent;
   assert.ok(sentBeforeResume < senderState.total, 'The test program must leave unsent lines in CNCjs');
   await press(0x03, 0, 0x0d);
-  await expect.poll(() => workflowState).toBe('running');
-  await expect.poll(() => latestState.status.activeState).toBe('Run');
-  await expect.poll(() => senderState.sent).toBeGreaterThan(sentBeforeResume);
+  await poll(() => workflowState).toBe('running');
+  await poll(() => latestState.status.activeState).toBe('Run');
+  await poll(() => senderState.sent).toBeGreaterThan(sentBeforeResume);
   await pendantFrame.locator('#log').evaluate(element => { element.textContent = ''; });
   await press(0x02, 0, 0x0d);
-  await expect.poll(() => workflowState).toBe('idle');
-  await expect.poll(() => latestState.status.activeState).toBe('Idle');
+  await poll(() => workflowState).toBe('idle');
+  await poll(() => latestState.status.activeState).toBe('Idle');
   await expect(pendantFrame.locator('#log')).toContainText('Stop completed.');
   assert.deepEqual(browserErrors, [], 'LinuxCNC-style pendant controls must run without browser errors');
   const portClosed = event(socket, 'serialport:close');
   socket.emit('close', 'SIMULATOR');
   await portClosed;
   await expect(pendantFrame.locator('#sockPill')).not.toHaveText('joined');
-  await expect.poll(lcdFrame).toEqual([0xfe, 0xfd, 0xfe, 0x40, ...Array(17).fill(0)]);
+  await poll(lcdFrame).toEqual([0xfe, 0xfd, 0xfe, 0x40, ...Array(17).fill(0)]);
   socket.disconnect();
 }
 
@@ -835,7 +845,7 @@ async function exerciseSharedClearance({ page, pendantFrame, socket, writes, bas
   };
   const press = async key => {
     const expectedParser = structuredClone(state().parserstate);
-    await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
+    await poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
       window.testControllerState?.parserstate)).toEqual(expectedParser);
     await page.frame({ name: 'pendant' }).evaluate(key => {
       for (const firstKeyCode of [key, 0]) window.testPendant.dispatchEvent(new CustomEvent('use', {
@@ -845,12 +855,12 @@ async function exerciseSharedClearance({ page, pendantFrame, socket, writes, bas
   };
   const position = frame => ['x', 'y', 'z'].map(axis => Number(state().status[frame][axis]));
   const idleAt = async expected => {
-    await expect.poll(() => position('mpos')).toEqual(expected);
-    await expect.poll(() => state().status.activeState).toBe('Idle');
+    await poll(() => position('mpos')).toEqual(expected);
+    await poll(() => state().status.activeState).toBe('Idle');
   };
   const startInInches = async () => {
     socket.emit('command', 'SIMULATOR', 'gcode', 'G20');
-    await expect.poll(() => state().parserstate?.modal?.units).toBe('G20');
+    await poll(() => state().parserstate?.modal?.units).toBe('G20');
   };
   const clearanceCommands = start => writes.slice(start).map(line => line.trim())
     .filter(line => /\b(?:G53|G54)\b/.test(line));
@@ -865,7 +875,7 @@ async function exerciseSharedClearance({ page, pendantFrame, socket, writes, bas
   // This distinguishes G53 Z from a work-coordinate retract and makes W-Home
   // prove it returns XY only, without a final move to work Z0.
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X2 Y3 Z4');
-  await expect.poll(() => position('wpos')).toEqual([2, 3, 4]);
+  await poll(() => position('wpos')).toEqual([2, 3, 4]);
   const initial = position('mpos');
   await configureTool({ toolChangeZ: -12.5 });
   await startInInches();
@@ -989,19 +999,19 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   await printedMacro10.selectOption('custom');
   const macro10Code = pendantFrame.getByRole('textbox', { name: 'G-code for Macro-10 (Fn+Macro-10)', exact: true });
   await macro10Code.fill('G20');
-  await expect.poll(storedMacros).toEqual({ 14: 'G20' });
+  await poll(storedMacros).toEqual({ 14: 'G20' });
   await reloadPendant();
   await expect(macro10Code).toHaveValue('G20');
   const macro10Start = writes.length;
   await macroButton(0x10, 0x0c);
-  await expect.poll(() => state().parserstate?.modal?.units).toBe('G20');
-  await expect.poll(() => writes.slice(macro10Start).map(line => line.trim()).filter(line => /^(G20|G21)$/.test(line)))
+  await poll(() => state().parserstate?.modal?.units).toBe('G20');
+  await poll(() => writes.slice(macro10Start).map(line => line.trim()).filter(line => /^(G20|G21)$/.test(line)))
     .toEqual(['G20']);
   await macro10Code.fill('G21');
   await macroButton(0x10, 0x0c);
-  await expect.poll(() => state().parserstate?.modal?.units).toBe('G21');
+  await poll(() => state().parserstate?.modal?.units).toBe('G21');
   await pendantFrame.getByRole('button', { name: 'Remove macro for Macro-10 (Fn+Macro-10)', exact: true }).click();
-  await expect.poll(storedMacros).toEqual({});
+  await poll(storedMacros).toEqual({});
   await reloadPendant();
   await expect(printedMacro10).toHaveCount(0);
   await unusedMacroButton.selectOption('1');
@@ -1010,7 +1020,7 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   await expect(unusedMacroButton.locator('option[value="1"]')).toHaveCount(0);
   const assignment = pendantFrame.getByRole('combobox', { name: 'Assignment for Macro-1 (Fn+Feed+)', exact: true });
   await expect(assignment).toHaveValue('disabled');
-  await expect.poll(storedMacros).toEqual({ 1: { source: 'disabled' } });
+  await poll(storedMacros).toEqual({ 1: { source: 'disabled' } });
   await reloadPendant();
   await expect(assignment).toHaveValue('disabled');
   const disabledStart = writes.length;
@@ -1040,12 +1050,12 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   const peerFrame = page.frameLocator('iframe[name="pendant-peer"]');
   try {
     await expect(peerFrame.locator('#sockPill')).toHaveText('joined');
-    await expect.poll(() => page.frame({ name: 'pendant-peer' }).evaluate(() => Boolean(window.testPendant))).toBe(true);
+    await poll(() => page.frame({ name: 'pendant-peer' }).evaluate(() => Boolean(window.testPendant))).toBe(true);
     await peerFrame.getByText('Macro buttons', { exact: true }).click();
     const peerAssignment = peerFrame.getByRole('combobox', { name: 'Assignment for Macro-1 (Fn+Feed+)', exact: true });
     await expect(peerAssignment).toHaveValue(`cncjs:${savedMacro.id}`);
     await assignment.selectOption('disabled');
-    await expect.poll(storedMacros).toEqual({ 1: { source: 'disabled' } });
+    await poll(storedMacros).toEqual({ 1: { source: 'disabled' } });
     await peerAssignment.selectOption('disabled');
     const sharedDisabledStart = writes.length;
     for (const [frameName, frame] of [['pendant', pendantFrame], ['pendant-peer', peerFrame]]) {
@@ -1061,12 +1071,12 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
     await page.locator('iframe[name="pendant-peer"]').evaluate(frame => frame.remove());
   }
   await macroButton(0x04, 0x0c);
-  await expect.poll(() => state().parserstate?.modal?.units).toBe('G20');
+  await poll(() => state().parserstate?.modal?.units).toBe('G20');
   await macroApi(`/${savedMacro.id}`, 'PUT', { name: 'Updated units', content: '%units=21\nG[units]' });
   // CNCjs configstore uses fs.watchFile's ~5 s polling interval.
   await expect(assignment.locator('option', { hasText: 'Updated units' })).toHaveCount(1, { timeout: 12000 });
   await macroButton(0x04, 0x0c);
-  await expect.poll(() => state().parserstate?.modal?.units).toBe('G21');
+  await poll(() => state().parserstate?.modal?.units).toBe('G21');
   await unusedMacroButton.selectOption('2');
   await pendantFrame.getByRole('button', { name: 'Add macro button', exact: true }).click();
   await expect(pendantFrame.locator('.macro-assignment')).toHaveCount(2);
@@ -1093,7 +1103,7 @@ async function exerciseControls({ page, pendantFrame, socket, writes, macroApi, 
   const customWrites = writes.length;
   const customCompleted = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G21');
   await macroButton(0x05, 0x0c);
-  await expect.poll(() => writes.slice(customWrites).map(line => line.trim()).filter(line => ['G20', 'G21'].includes(line)))
+  await poll(() => writes.slice(customWrites).map(line => line.trim()).filter(line => ['G20', 'G21'].includes(line)))
     .toEqual(['G20', 'G21']);
   await customCompleted;
   // A response arriving after Stop must never turn into delayed macro execution.
@@ -1148,9 +1158,9 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   const unitWrites = start => writes.slice(start).map(line => line.trim()).filter(line => /^(G20|G21)$/.test(line));
   const position = () => ['x', 'y', 'z'].map(axis => Number(state().status.mpos[axis]));
   const confirmed = async (units, readout) => {
-    await expect.poll(() => state().parserstate?.modal?.units).toBe(units);
-    await expect.poll(() => pendant.state.parserstate?.modal?.units).toBe(units);
-    await expect.poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
+    await poll(() => state().parserstate?.modal?.units).toBe(units);
+    await poll(() => pendant.state.parserstate?.modal?.units).toBe(units);
+    await poll(() => page.frame({ name: 'pendant' }).evaluate(() =>
       window.testControllerState?.parserstate?.modal?.units)).toBe(units);
     await expect(droFrame.getByTestId('axis-value-x')).toHaveText(readout);
     await expect(pendantFrame.locator('#mode')).toHaveText(`step (${units === 'G20' ? 'in' : 'mm'})`);
@@ -1166,7 +1176,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   };
   // Give ABS a nonzero controller datum before testing unit conversion.
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X5');
-  await expect.poll(() => Number(state().status.wpos.x)).toBe(5);
+  await poll(() => Number(state().status.wpos.x)).toBe(5);
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   const stationary = position();
   for (const [units, readout] of [['G20', '0.1969'], ['G21', '5.0000']]) {
@@ -1186,12 +1196,12 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   // ABS is controller-owned: this zero changes WPos, not MPos.
   await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
-  await expect.poll(() => Number(state().status.wpos.x)).toBe(0);
+  await poll(() => Number(state().status.wpos.x)).toBe(0);
   assert.equal(position()[0], 5);
   const motion = new Grbl(pendant);
   assert.equal(motion.jog('X', 5, 750), 'sent');
-  await expect.poll(() => ({ x: position()[0], phase: state().status.activeState })).toEqual({ x: 10, phase: 'Idle' });
-  await expect.poll(() => Number(state().status.wpos.x)).toBe(5);
+  await poll(() => ({ x: position()[0], phase: state().status.activeState })).toEqual({ x: 10, phase: 'Idle' });
+  await poll(() => Number(state().status.wpos.x)).toBe(5);
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   // Controller report units stay millimetres while the display is inches. Both
   // toggle directions and an external change must preserve the physical datum.
@@ -1209,7 +1219,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
   const offsetStart = writes.length;
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X2.54');
-  await expect.poll(() => Number(state().status.wpos.x)).toBe(2.54);
+  await poll(() => Number(state().status.wpos.x)).toBe(2.54);
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('2.5400');
   assert.equal(position()[0], 10, 'External work-offset changes must not move MPos');
   assert.deepEqual(writes.slice(offsetStart).map(line => line.trim()).filter(line => line.includes('G10')),
@@ -1218,7 +1228,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   await confirmed('G20', '0.1000');
   const zeroStart = writes.length;
   await droFrame.getByRole('button', { name: 'Zero X axis', exact: true }).click();
-  await expect.poll(() => Number(state().status.wpos.x)).toBe(0);
+  await poll(() => Number(state().status.wpos.x)).toBe(0);
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000');
   assert.equal(position()[0], 10, 'EL400 inch-mode zero must change WPos without motion');
   const zeroCommands = writes.slice(zeroStart).map(line => line.trim()).filter(line => line.includes('G10'));
@@ -1242,7 +1252,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   assert.equal(state().parserstate.modal.units, 'G20', 'Regression setup must queue G21 behind the dwell');
   await preset(['0', 'decimal', '1']);
   await presetSent;
-  await expect.poll(() => Number(state().status.wpos.x)).toBe(2.54);
+  await poll(() => Number(state().status.wpos.x)).toBe(2.54);
   await confirmed('G20', '0.1000');
   assert.equal(position()[0], 10, 'A queued 0.1-inch ABS preset must set WPos to 2.54 mm without motion');
   const queuedWrites = writes.slice(inchPresetStart).map(line => line.trim());
@@ -1257,7 +1267,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21');
   await confirmed('G21', '2.5400');
   await preset(['3', 'decimal', '2', '5']);
-  await expect.poll(() => Number(state().status.wpos.x)).toBe(3.25);
+  await poll(() => Number(state().status.wpos.x)).toBe(3.25);
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('3.2500');
   assert.equal(position()[0], 10, 'Millimetre ABS preset must preserve MPos');
   // Local INC edits never reach the controller, even after external offset changes.
@@ -1276,7 +1286,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   assert.ok(!writes.slice(localStart).some(line => /\bG10\b/.test(line)), 'INC zero, preset and half must not issue G10');
   const externalStart = writes.length;
   socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G10 L20 P1 X7');
-  await expect.poll(() => Number(state().status.wpos.x)).toBe(7);
+  await poll(() => Number(state().status.wpos.x)).toBe(7);
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('4.0000');
   assert.deepEqual(writes.slice(externalStart).map(line => line.trim()).filter(line => /\bG10\b/.test(line)),
     ['G21 G10 L20 P1 X7'], 'An external offset change must not be echoed');
@@ -1284,7 +1294,7 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('7.0000');
   assert.equal(position()[0], 10);
   assert.equal(motion.jog('X', 1, 750), 'sent');
-  await expect.poll(() => ({ x: position()[0], phase: state().status.activeState })).toEqual({ x: 11, phase: 'Idle' });
+  await poll(() => ({ x: position()[0], phase: state().status.activeState })).toEqual({ x: 11, phase: 'Idle' });
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('8.0000');
   await droFrame.getByRole('button', { name: 'Abs/Inc', exact: true }).click();
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('5.0000');
@@ -1297,6 +1307,6 @@ async function exerciseUnitSync({ page, pendantFrame, droFrame, socket, writes, 
   assert.deepEqual(unitWrites(busyStart), [], 'Busy controller must reject unit requests');
   assert.equal(state().parserstate.modal.units, 'G21');
   motion.cancelJog();
-  await expect.poll(() => state().status.activeState).toBe('Idle');
+  await poll(() => state().status.activeState).toBe('Idle');
   motion.clearJog();
 }
