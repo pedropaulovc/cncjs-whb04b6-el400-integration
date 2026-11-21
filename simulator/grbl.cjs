@@ -16,13 +16,82 @@ const OVERRIDE_COMMANDS = new Map([
   [0x9b, ['spindleOverride', 'add', -10]], [0x9c, ['spindleOverride', 'add', 1]],
   [0x9d, ['spindleOverride', 'add', -1]],
 ]);
+const WORK_COORDINATE_SYSTEMS = ['G54', 'G55', 'G56', 'G57', 'G58', 'G59'];
+// FluidNC 4.1.1 MotionControl.cpp mc_probe_cycle: G38.2/.4 alarm on a miss,
+// G38.3/.5 report it; .4/.5 stop when contact is lost instead of made.
+// https://github.com/bdring/FluidNC/blob/v4.1.1/FluidNC/src/MotionControl.cpp#L333-L422
+const PROBE_CYCLES = {
+  'G38.2': { direction: 'toward', miss: 'alarm' },
+  'G38.3': { direction: 'toward', miss: 'report' },
+  'G38.4': { direction: 'away', miss: 'alarm' },
+  'G38.5': { direction: 'away', miss: 'report' },
+};
+const MOTION_MODES = ['G0', 'G1', 'G80', ...Object.keys(PROBE_CYCLES)];
+// FluidNC 4.1.1 Protocol.cpp alarm names, reported as "[MSG:INFO: ALARM: name]" then "ALARM:n".
+const ALARMS = { 4: 'Probe Fail Initial', 5: 'Probe Fail Contact' };
+// Contact tolerance, in mm, absorbs floating-point error at a computed contact point.
+const CONTACT_TOLERANCE = 1e-7;
+// An away cycle stops just past the surface, where the switch has opened.
+const RELEASE_TRAVEL = 1e-6;
+const DEFAULT_TOOLSETTER_SIZE = 10;
+const format = position => position.map(n => n.toFixed(3)).join(',');
+
+// Inputs are boxes in machine coordinates with an unbounded bottom: the probe
+// tip touches one when it is inside or on the box. `null` disables an input.
+function inside(box, point) {
+  return point.every((n, i) => n >= box.min[i] - CONTACT_TOLERANCE && n <= box.max[i] + CONTACT_TOLERANCE);
+}
+
+// The parameter interval [enter, exit] where start + t * delta is in the box, t >= 0.
+function crossing(box, start, delta) {
+  let enter = 0;
+  let exit = Infinity;
+  for (let i = 0; i < 3; i++) {
+    if (delta[i] === 0) {
+      if (start[i] < box.min[i] - CONTACT_TOLERANCE || start[i] > box.max[i] + CONTACT_TOLERANCE) return null;
+      continue;
+    }
+    const a = (box.min[i] - start[i]) / delta[i];
+    const b = (box.max[i] - start[i]) / delta[i];
+    enter = Math.max(enter, Math.min(a, b));
+    exit = Math.min(exit, Math.max(a, b));
+  }
+  if (enter > exit) return null;
+  return { enter, exit };
+}
+
+// "$SIM/probe=xmin,xmax,ymin,ymax,ztop" or "$SIM/toolsetter=x,y,ztop[,size]"; "off" disables.
+function parseInput(name, text) {
+  if (text === 'OFF') return null;
+  const numbers = text.split(',').map(Number);
+  if (numbers.some(n => !Number.isFinite(n))) return undefined;
+  if (name === 'PROBE') {
+    if (numbers.length !== 5) return undefined;
+    const [xMin, xMax, yMin, yMax, top] = numbers;
+    if (xMin > xMax || yMin > yMax) return undefined;
+    return { min: [xMin, yMin, -Infinity], max: [xMax, yMax, top] };
+  }
+  if (numbers.length !== 3 && numbers.length !== 4) return undefined;
+  const [x, y, top, size = DEFAULT_TOOLSETTER_SIZE] = numbers;
+  if (size <= 0) return undefined;
+  return { min: [x - size / 2, y - size / 2, -Infinity], max: [x + size / 2, y + size / 2, top] };
+}
+
+function describeInput(name, box) {
+  if (!box) return 'OFF';
+  if (name === 'PROBE') return format([box.min[0], box.max[0], box.min[1], box.max[1], box.max[2]]);
+  return format([(box.min[0] + box.max[0]) / 2, (box.min[1] + box.max[1]) / 2, box.max[2], box.max[0] - box.min[0]]);
+}
 
 // A deliberately limited GRBL 1.1 protocol simulator, not a machining verifier.
 class GrblSimulator {
   constructor(send) {
     this.send = send;
     this.position = [0, 0, 0];
-    this.offset = [0, 0, 0];
+    this.offsets = WORK_COORDINATE_SYSTEMS.map(() => [0, 0, 0]);
+    this.probeReport = { position: [0, 0, 0], result: 'missed' };
+    // Virtual inputs, reported as FluidNC's Pn:P (probe) and Pn:T (toolsetter).
+    this.inputBoxes = { PROBE: null, TOOLSETTER: null };
     this.buffer = '';
     this.inputState = 'collecting';
     this.reset();
@@ -37,6 +106,8 @@ class GrblSimulator {
     this.units = 'G21';
     this.distance = 'G90';
     this.mode = 'G0';
+    this.wcs = 0;
+    this.toolLengthOffset = 0;
     this.feed = 100;
     this.spindle = 0;
     this.spindleMode = 'M5';
@@ -49,12 +120,43 @@ class GrblSimulator {
     this.send("Grbl 1.1h ['$' for help]");
   }
 
+  // The active work coordinate offset, including the Z tool length offset.
+  get offset() {
+    return this.offsets[this.wcs].map((n, i) => i === 2 ? n + this.toolLengthOffset : n);
+  }
+
+  // FluidNC Report.cpp order: probe 'P' first, then toolsetter 'T'.
+  inputs() {
+    return (this.inputBoxes.PROBE && inside(this.inputBoxes.PROBE, this.position) ? 'P' : '')
+      + (this.inputBoxes.TOOLSETTER && inside(this.inputBoxes.TOOLSETTER, this.position) ? 'T' : '');
+  }
+
   status() {
     const feed = this.state === 'Run' || this.state === 'Jog' ? this.motionFeed() : 0;
     const spindle = this.spindleMode === 'M5' ? 0 : Math.min(MAX_SPINDLE_RPM, this.spindle * this.spindleOverride / 100);
     const spindleAccessory = spindle === 0 ? '' : this.spindleMode === 'M3' ? 'S' : 'C';
     const accessories = spindleAccessory + COOLANT_ACCESSORIES[this.coolantMode];
-    this.send(`<${this.state}|MPos:${this.position.map(n => n.toFixed(3)).join(',')}|WCO:${this.offset.map(n => n.toFixed(3)).join(',')}|FS:${feed},${spindle}|Ov:${this.feedOverride},${this.rapidOverride},${this.spindleOverride}${accessories ? '|A:' + accessories : ''}>`);
+    const pins = this.inputs();
+    this.send(`<${this.state}|MPos:${format(this.position)}|WCO:${format(this.offset)}|FS:${feed},${spindle}${pins ? '|Pn:' + pins : ''}|Ov:${this.feedOverride},${this.rapidOverride},${this.spindleOverride}${accessories ? '|A:' + accessories : ''}>`);
+  }
+
+  alarm(code) {
+    this.send(`[MSG:INFO: ALARM: ${ALARMS[code]}]`);
+    this.send(`ALARM:${code}`);
+    this.state = 'Alarm';
+  }
+
+  simulatorCommand(line) {
+    const match = /^\$SIM\/(PROBE|TOOLSETTER)(?:=(.+))?$/.exec(line);
+    if (!match) return this.send('error:3');
+    const [, name, value] = match;
+    if (value !== undefined) {
+      const box = parseInput(name, value);
+      if (box === undefined) return this.send('error:3');
+      this.inputBoxes[name] = box;
+    }
+    this.send(`[SIM/${name}:${describeInput(name, this.inputBoxes[name])}]`);
+    this.send('ok');
   }
 
   motionFeed() {
@@ -131,16 +233,20 @@ class GrblSimulator {
       for (const [key, value] of Object.entries({ 0: 10, 1: 25, 10: 1, 13: 0, 20: 0, 21: 0, 22: 0, 30: MAX_SPINDLE_RPM, 31: 0, 32: 0, 100: 250, 101: 250, 102: 250, 110: MAX_AXIS_RATES[0], 111: MAX_AXIS_RATES[1], 112: MAX_AXIS_RATES[2], 120: 100, 121: 100, 122: 100, 130: 300, 131: 300, 132: 100 })) this.send(`$${key}=${value}`);
       return ok();
     }
-    if (line === '$G') { this.send(`[GC:${this.mode} G54 G17 ${this.units} ${this.distance} G94 ${this.spindleMode} ${COOLANT_CODES[this.coolantMode]} T0 F${this.feed} S${this.spindle}]`); return ok(); }
+    if (line === '$G') { this.send(`[GC:${this.mode} ${WORK_COORDINATE_SYSTEMS[this.wcs]} G17 ${this.units} ${this.distance} G94 ${this.spindleMode} ${COOLANT_CODES[this.coolantMode]} T0 F${this.feed} S${this.spindle}]`); return ok(); }
     if (line === '$#') {
-      for (const name of ['G54', 'G55', 'G56', 'G57', 'G58', 'G59', 'G28', 'G30', 'G92']) this.send(`[${name}:${(name === 'G54' ? this.offset : [0, 0, 0]).map(n => n.toFixed(3)).join(',')}]`);
-      this.send('[TLO:0.000]'); this.send('[PRB:0.000,0.000,0.000:0]'); return ok();
+      WORK_COORDINATE_SYSTEMS.forEach((name, i) => this.send(`[${name}:${format(this.offsets[i])}]`));
+      for (const name of ['G28', 'G30', 'G92']) this.send(`[${name}:0.000,0.000,0.000]`);
+      this.send(`[TLO:${this.toolLengthOffset.toFixed(3)}]`);
+      this.send(`[PRB:${format(this.probeReport.position)}:${this.probeReport.result === 'contact' ? 1 : 0}]`);
+      return ok();
     }
     if (line === '$X') { if (this.state === 'Alarm') this.state = 'Idle'; return ok(); }
     if (line === '$H') {
       if (this.motion) return error(8);
       this.position = [0, 0, 0]; return ok();
     }
+    if (line.startsWith('$SIM/')) return this.simulatorCommand(line);
     const kind = line.startsWith('$J=') ? 'Jog' : 'Run';
     if (line.startsWith('$') && kind !== 'Jog') return error(3);
     // protocol.c allows normal G-code while held; system.c restricts $J to Idle/Jog.
@@ -151,12 +257,12 @@ class GrblSimulator {
     const words = [...source.matchAll(/([A-Z])([-+]?(?:\d+(?:\.\d*)?|\.\d+))/g)];
     if (words.map(m => m[0]).join('') !== source) return error(2);
     const codes = words.filter(m => 'GM'.includes(m[1])).map(m => m[1] + Number(m[2]));
-    if (codes.some(c => !['G0', 'G1', 'G4', 'G10', 'G17', 'G20', 'G21', 'G40', 'G49', 'G53', 'G54', 'G80', 'G90', 'G91', 'G94', 'M3', 'M4', 'M5', 'M7', 'M8', 'M9'].includes(c))) return error(20);
+    if (codes.some(c => ![...MOTION_MODES, ...WORK_COORDINATE_SYSTEMS, 'G4', 'G10', 'G17', 'G20', 'G21', 'G40', 'G43.1', 'G49', 'G53', 'G90', 'G91', 'G94', 'M3', 'M4', 'M5', 'M7', 'M8', 'M9'].includes(c))) return error(20);
     if (words.some(m => !'GMXYZFSLPN'.includes(m[1]))) return error(20);
     if (kind === 'Jog' && codes.some(c => !['G20', 'G21', 'G90', 'G91', 'G53'].includes(c))) return error(20);
     const letters = words.filter(m => !'GM'.includes(m[1])).map(m => m[1]);
     if (new Set(letters).size !== letters.length) return error(25);
-    for (const group of [['G0', 'G1', 'G80'], ['G20', 'G21'], ['G90', 'G91'], ['M3', 'M4', 'M5'], ['M7', 'M8', 'M9']]) {
+    for (const group of [MOTION_MODES, WORK_COORDINATE_SYSTEMS, ['G43.1', 'G49'], ['G20', 'G21'], ['G90', 'G91'], ['M3', 'M4', 'M5'], ['M7', 'M8', 'M9']]) {
       if (codes.filter(c => group.includes(c)).length > 1) return error(21);
     }
     const values = Object.fromEntries(words.map(m => [m[1], Number(m[2])]));
@@ -179,39 +285,103 @@ class GrblSimulator {
     if (!Number.isFinite(feed) || feed <= 0) return error(22);
     if (kind === 'Jog' && values.F === undefined) return error(22);
     const axes = ['X', 'Y', 'Z'];
-    if (codes.includes('G53') && distance !== 'G90') return error(30);
+    const mode = codes.find(c => MOTION_MODES.includes(c)) || this.mode;
+    if (codes.includes('G53') && kind === 'Run' && !['G0', 'G1'].includes(mode)) return error(30);
     if (codes.includes('G80') && axes.some(axis => values[axis] !== undefined)) return error(31);
     if (this.motion && this.motion.kind !== kind) return error(8);
     if (values.S !== undefined && values.S < 0) return error(4);
+    const wcs = WORK_COORDINATE_SYSTEMS.indexOf(codes.find(c => WORK_COORDINATE_SYSTEMS.includes(c)) || WORK_COORDINATE_SYSTEMS[this.wcs]);
+    const lengthOffset = codes.find(c => c === 'G43.1' || c === 'G49');
+    // Grbl gcode.c: G43.1 takes exactly the tool length (Z) axis word.
+    if (lengthOffset === 'G43.1' && (values.Z === undefined || values.X !== undefined || values.Y !== undefined)) return error(37);
+    const toolLengthOffset = lengthOffset === 'G43.1' ? values.Z * scale : lengthOffset === 'G49' ? 0 : this.toolLengthOffset;
+    const moves = !codes.includes('G10') && lengthOffset !== 'G43.1' && axes.some(axis => values[axis] !== undefined);
+    const target = axes.map((axis, i) => {
+      if (values[axis] === undefined) return previous[i];
+      // Grbl gcode.c: G53 targets are absolute machine coordinates even in G91.
+      if (codes.includes('G53')) return values[axis] * scale;
+      if (distance === 'G91') return previous[i] + values[axis] * scale;
+      return values[axis] * scale + this.offsets[wcs][i] + (i === 2 ? toolLengthOffset : 0);
+    });
+    if (moves && target.some(n => !Number.isFinite(n))) return error(2);
+    const delta = target.map((n, i) => n - previous[i]);
+    const length = Math.hypot(...delta);
+    const probe = kind === 'Run' && moves ? PROBE_CYCLES[mode] : undefined;
+    if (probe && length === 0) return error(33);
     if (codes.includes('G10')) {
-      if (values.L !== 20 || values.P !== 1) return error(20);
-      if (this.motion || this.queue.length) return this.defer(raw, 'synchronizing');
-      axes.forEach((axis, i) => { if (values[axis] !== undefined) this.offset[i] = this.position[i] - values[axis] * scale; });
+      if (values.L !== 20) return error(20);
+      if (values.P === undefined) return error(28);
+      if (!Number.isInteger(values.P) || values.P < 0 || values.P > 6) return error(29);
     }
-    const mode = codes.find(c => c === 'G0' || c === 'G1') || this.mode;
+    // G10 writes offsets and a probe cycle starts only after queued motion completes.
+    if ((codes.includes('G10') || probe) && (this.motion || this.queue.length)) return this.defer(raw, 'synchronizing');
+    if (codes.includes('G10')) {
+      // L20: the current position becomes the given work coordinate (P0 = active system).
+      const system = values.P === 0 ? wcs : values.P - 1;
+      axes.forEach((axis, i) => {
+        if (values[axis] === undefined) return;
+        this.offsets[system][i] = this.position[i] - values[axis] * scale - (i === 2 ? this.toolLengthOffset : 0);
+      });
+    }
     if (kind === 'Run') {
       this.units = units; this.distance = distance; this.mode = mode; this.feed = feed;
+      this.wcs = wcs; this.toolLengthOffset = toolLengthOffset;
       this.spindleMode = codes.find(c => c === 'M3' || c === 'M4' || c === 'M5') || this.spindleMode;
       if (values.S !== undefined) this.spindle = values.S;
       if (codes.includes('M7')) this.coolantMode = ['flood', 'both'].includes(this.coolantMode) ? 'both' : 'mist';
       if (codes.includes('M8')) this.coolantMode = ['mist', 'both'].includes(this.coolantMode) ? 'both' : 'flood';
       if (codes.includes('M9')) this.coolantMode = 'off';
     }
-    if (codes.includes('G10')) return ok();
-    if (!axes.some(axis => values[axis] !== undefined)) return ok();
-    const target = axes.map((axis, i) => {
-      if (values[axis] === undefined) return previous[i];
-      if (distance === 'G91') return previous[i] + values[axis] * scale;
-      return values[axis] * scale + (codes.includes('G53') ? 0 : this.offset[i]);
-    });
-    if (target.some(n => !Number.isFinite(n))) return error(2);
-    const delta = target.map((n, i) => n - previous[i]);
-    const length = Math.hypot(...delta);
+    if (!moves) return ok();
     const rapidRate = length === 0 ? Math.max(...MAX_AXIS_RATES)
       : Math.min(...delta.map((n, i) => n === 0 ? Infinity : MAX_AXIS_RATES[i] * length / Math.abs(n)));
-    this.queue.push({ target, feed, rapidRate, rateMode: kind === 'Run' && mode === 'G0' ? 'rapid' : 'feed', kind });
+    const motion = { target, feed, rapidRate, rateMode: kind === 'Run' && mode === 'G0' ? 'rapid' : 'feed', kind };
+    if (probe) return this.startProbe(motion, probe);
+    this.queue.push(motion);
     this.next();
     ok();
+  }
+
+  // The planner is empty here. The line's ACK waits for the cycle to finish.
+  startProbe(motion, probe) {
+    const touching = this.inputs() !== '';
+    if (touching === (probe.direction === 'toward')) {
+      this.alarm(4);
+      this.send('ok');
+      return;
+    }
+    this.queue.push({ ...motion, probe });
+    this.commandState = 'probing';
+    this.next();
+  }
+
+  // The fraction of the remaining move at which the probe cycle's trigger fires, if any.
+  probeTrigger(delta, fraction) {
+    const boxes = Object.values(this.inputBoxes).filter(Boolean);
+    if (this.motion.probe.direction === 'toward') {
+      const enters = boxes.map(box => crossing(box, this.position, delta)).filter(Boolean).map(span => span.enter);
+      const enter = Math.min(...enters);
+      return enter <= fraction ? enter : undefined;
+    }
+    const exits = boxes.filter(box => inside(box, this.position)).map(box => crossing(box, this.position, delta)?.exit ?? 0);
+    if (!exits.length) return 0;
+    const exit = Math.max(...exits) + RELEASE_TRAVEL / Math.hypot(...delta);
+    return exit <= fraction ? exit : undefined;
+  }
+
+  finishProbe(outcome) {
+    const { miss } = this.motion.probe;
+    this.motion = null;
+    this.state = 'Idle';
+    if (outcome === 'contact' || miss === 'report') this.probeReport = { position: [...this.position], result: outcome };
+    if (outcome === 'missed' && miss === 'alarm') {
+      this.probeReport = { ...this.probeReport, result: 'missed' };
+      this.alarm(5);
+    }
+    this.send(`[PRB:${format(this.probeReport.position)}:${this.probeReport.result === 'contact' ? 1 : 0}]`);
+    this.commandState = 'ready';
+    this.send('ok');
+    this.resumeCommands();
   }
 
   next() {
@@ -249,12 +419,20 @@ class GrblSimulator {
   advanceLinear(seconds) {
     const delta = this.motion.target.map((n, i) => n - this.position[i]);
     const duration = Math.hypot(...delta) / (this.motionFeed() / 60);
+    const fraction = duration === 0 ? 1 : Math.min(1, seconds / duration);
+    const trigger = this.motion.probe ? this.probeTrigger(delta, fraction) : undefined;
+    if (trigger !== undefined) {
+      this.position = this.position.map((n, i) => n + delta[i] * trigger);
+      this.finishProbe('contact');
+      return seconds - duration * trigger;
+    }
     if (seconds < duration) {
       this.position = this.position.map((n, i) => n + delta[i] * seconds / duration);
       return null;
     }
     this.position = this.motion.target;
-    this.completeMotion();
+    if (this.motion.probe) this.finishProbe('missed');
+    else this.completeMotion();
     return seconds - duration;
   }
 
