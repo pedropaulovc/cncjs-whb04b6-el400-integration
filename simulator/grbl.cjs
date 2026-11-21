@@ -31,15 +31,23 @@ const MOTION_MODES = ['G0', 'G1', 'G80', ...Object.keys(PROBE_CYCLES)];
 const ALARMS = { 4: 'Probe Fail Initial', 5: 'Probe Fail Contact' };
 // Contact tolerance, in mm, absorbs floating-point error at a computed contact point.
 const CONTACT_TOLERANCE = 1e-7;
-// An away cycle stops just past the surface, where the switch has opened.
-const RELEASE_TRAVEL = 1e-6;
+// An away cycle stops where the tip clears every input by this much, measured
+// along each face normal, so the stop point is outside CONTACT_TOLERANCE.
+const RELEASE_CLEARANCE = 1e-6;
 const DEFAULT_TOOLSETTER_SIZE = 10;
 const format = position => position.map(n => n.toFixed(3)).join(',');
+const NUMBER = /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+// Grbl gcode.c: these commands all claim the block's axis words (error:24 when combined).
+const AXIS_COMMANDS = ['G0', 'G1', ...Object.keys(PROBE_CYCLES), 'G10', 'G43.1', 'G49'];
 
 // Inputs are boxes in machine coordinates with an unbounded bottom: the probe
 // tip touches one when it is inside or on the box. `null` disables an input.
 function inside(box, point) {
   return point.every((n, i) => n >= box.min[i] - CONTACT_TOLERANCE && n <= box.max[i] + CONTACT_TOLERANCE);
+}
+
+function grow(box, margin) {
+  return { min: box.min.map(n => n - margin), max: box.max.map(n => n + margin) };
 }
 
 // The parameter interval [enter, exit] where start + t * delta is in the box, t >= 0.
@@ -63,8 +71,9 @@ function crossing(box, start, delta) {
 // "$SIM/probe=xmin,xmax,ymin,ymax,ztop" or "$SIM/toolsetter=x,y,ztop[,size]"; "off" disables.
 function parseInput(name, text) {
   if (text === 'OFF') return null;
-  const numbers = text.split(',').map(Number);
-  if (numbers.some(n => !Number.isFinite(n))) return undefined;
+  const fields = text.split(',');
+  if (!fields.every(field => NUMBER.test(field))) return undefined;
+  const numbers = fields.map(Number);
   if (name === 'PROBE') {
     if (numbers.length !== 5) return undefined;
     const [xMin, xMax, yMin, yMax, top] = numbers;
@@ -291,6 +300,7 @@ class GrblSimulator {
     if (this.motion && this.motion.kind !== kind) return error(8);
     if (values.S !== undefined && values.S < 0) return error(4);
     const wcs = WORK_COORDINATE_SYSTEMS.indexOf(codes.find(c => WORK_COORDINATE_SYSTEMS.includes(c)) || WORK_COORDINATE_SYSTEMS[this.wcs]);
+    if (codes.filter(c => AXIS_COMMANDS.includes(c)).length > 1) return error(24);
     const lengthOffset = codes.find(c => c === 'G43.1' || c === 'G49');
     // Grbl gcode.c: G43.1 takes exactly the tool length (Z) axis word.
     if (lengthOffset === 'G43.1' && (values.Z === undefined || values.X !== undefined || values.Y !== undefined)) return error(37);
@@ -346,6 +356,8 @@ class GrblSimulator {
   startProbe(motion, probe) {
     const touching = this.inputs() !== '';
     if (touching === (probe.direction === 'toward')) {
+      // mc_probe_cycle clears probe_succeeded before this check.
+      this.probeReport = { ...this.probeReport, result: 'missed' };
       this.alarm(4);
       this.send('ok');
       return;
@@ -363,10 +375,16 @@ class GrblSimulator {
       const enter = Math.min(...enters);
       return enter <= fraction ? enter : undefined;
     }
-    const exits = boxes.filter(box => inside(box, this.position)).map(box => crossing(box, this.position, delta)?.exit ?? 0);
-    if (!exits.length) return 0;
-    const exit = Math.max(...exits) + RELEASE_TRAVEL / Math.hypot(...delta);
-    return exit <= fraction ? exit : undefined;
+    // FluidNC trips on probe OR toolsetter, so an away cycle releases only where
+    // the path has left every input: walk the union of the (grown) boxes.
+    const spans = boxes.map(box => crossing(grow(box, RELEASE_CLEARANCE), this.position, delta))
+      .filter(Boolean).sort((a, b) => a.enter - b.enter);
+    let release = 0;
+    for (const span of spans) {
+      if (span.enter > release) break;
+      release = Math.max(release, span.exit);
+    }
+    return release <= fraction ? release : undefined;
   }
 
   finishProbe(outcome) {

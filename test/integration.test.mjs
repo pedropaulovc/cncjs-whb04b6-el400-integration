@@ -831,16 +831,7 @@ test('real CNCjs loads a conversational program from its sandboxed widget', { ti
   await withRealWidgets(t, 'conversational');
 });
 
-// Setup requires cncjs-probe, but until it is published and pinned an older
-// checkout can run this file without it; skip rather than fail there.
-const probeWidget = (() => {
-  try { return require.resolve('cncjs-probe/package.json'); } catch { return null; }
-})();
-
-test('real CNCjs probes Z with the probe widget and counts the toolsetter as a touch', {
-  timeout: 120000,
-  skip: probeWidget ? false : 'cncjs-probe is not installed: publish it, pin it in package.json and rerun setup',
-}, async t => {
+test('real CNCjs probes Z with the probe widget and counts the toolsetter as a touch', { timeout: 120000 }, async t => {
   await withRealWidgets(t, 'probe');
 });
 

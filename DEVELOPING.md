@@ -46,7 +46,7 @@ The probe scenario embeds `/probe/`, places the simulated probe surface, runs a
 Z-only Z Probe zeroing and checks the G54 Z offset (contact Z minus puck
 thickness). It then touches only the simulated toolsetter and checks that `Pn:T`
 lights the widget's touch indicator and enables **Start probe** with
-**Connection test** on. It is skipped when `cncjs-probe` is not installed.
+**Connection test** on.
 
 Publish pendant, EL400, conversational, dechatter or probe widget changes as an npm
 release from the respective repository before updating this integration. Install
