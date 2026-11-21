@@ -286,7 +286,6 @@ class GrblSimulator {
     if (kind === 'Jog' && values.F === undefined) return error(22);
     const axes = ['X', 'Y', 'Z'];
     const mode = codes.find(c => MOTION_MODES.includes(c)) || this.mode;
-    if (codes.includes('G53') && distance !== 'G90') return error(30);
     if (codes.includes('G53') && kind === 'Run' && !['G0', 'G1'].includes(mode)) return error(30);
     if (codes.includes('G80') && axes.some(axis => values[axis] !== undefined)) return error(31);
     if (this.motion && this.motion.kind !== kind) return error(8);
@@ -299,8 +298,9 @@ class GrblSimulator {
     const moves = !codes.includes('G10') && lengthOffset !== 'G43.1' && axes.some(axis => values[axis] !== undefined);
     const target = axes.map((axis, i) => {
       if (values[axis] === undefined) return previous[i];
-      if (distance === 'G91') return previous[i] + values[axis] * scale;
+      // Grbl gcode.c: G53 targets are absolute machine coordinates even in G91.
       if (codes.includes('G53')) return values[axis] * scale;
+      if (distance === 'G91') return previous[i] + values[axis] * scale;
       return values[axis] * scale + this.offsets[wcs][i] + (i === 2 ? toolLengthOffset : 0);
     });
     if (moves && target.some(n => !Number.isFinite(n))) return error(2);

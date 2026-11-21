@@ -389,13 +389,19 @@ test('work offsets change the work frame and G53 uses machine coordinates', () =
   assert.equal(sim.position[0], 15);
   command('G53 G0 X0'); sim.tick(1);
   assert.equal(sim.position[0], 0);
+  // gSender's tool length wizard sends G53 moves while in G91.
+  command('G91 G53 G0 X20'); sim.tick(1);
+  assert.equal(sim.position[0], 20);
+  assert.equal(sim.distance, 'G91');
+  command('G53 G0 X0'); sim.tick(1);
+  assert.equal(sim.position[0], 0);
   command('$#');
   assert.ok(lines.includes('[G54:10.000,0.000,0.000]'));
 });
 
 test('unsupported commands and malformed jogs fail without motion', () => {
   const { sim, command, lines } = machine();
-  for (const text of ['G28', 'G2 X10 I5', 'G1 A10', '$J=G91 X10', 'G1 Xoops', '$13=1', 'G90 G91 X10', 'G1 X10 X20', 'G53 G91 X10', '$J=M3 X1 F100', '$J=G38.2 Z-1 F100']) {
+  for (const text of ['G28', 'G2 X10 I5', 'G1 A10', '$J=G91 X10', 'G1 Xoops', '$13=1', 'G90 G91 X10', 'G1 X10 X20', 'G53 G38.2 X10 F100', '$J=M3 X1 F100', '$J=G38.2 Z-1 F100']) {
     command(text);
     assert.match(lines.at(-1), /^error:/, text);
     assert.deepEqual(sim.position, [0, 0, 0]);
