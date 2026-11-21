@@ -395,7 +395,7 @@ test('work offsets change the work frame and G53 uses machine coordinates', () =
 
 test('unsupported commands and malformed jogs fail without motion', () => {
   const { sim, command, lines } = machine();
-  for (const text of ['G38.2 Z-10 F100', 'G2 X10 I5', 'G1 A10', '$J=G91 X10', 'G1 Xoops', '$13=1', 'G90 G91 X10', 'G1 X10 X20', 'G53 G91 X10', '$J=M3 X1 F100']) {
+  for (const text of ['G28', 'G2 X10 I5', 'G1 A10', '$J=G91 X10', 'G1 Xoops', '$13=1', 'G90 G91 X10', 'G1 X10 X20', 'G53 G91 X10', '$J=M3 X1 F100', '$J=G38.2 Z-1 F100']) {
     command(text);
     assert.match(lines.at(-1), /^error:/, text);
     assert.deepEqual(sim.position, [0, 0, 0]);
@@ -411,6 +411,151 @@ test('overflow discards the entire line, including a valid-looking suffix', () =
   assert.equal(lines.filter(line => line === 'error:11').length, 1);
   sim.input('G0X1\n'); sim.tick(1);
   assert.equal(sim.position[0], 1);
+});
+
+test('G38.2 stops on the virtual probe surface and reports FluidNC PRB and Pn', () => {
+  const { sim, command, lines } = machine();
+  command('$SIM/probe=-50,50,-40,40,-20');
+  assert.deepEqual(lines.slice(-2), ['[SIM/PROBE:-50.000,50.000,-40.000,40.000,-20.000]', 'ok']);
+  command('G21 G91');
+  command('G38.2 Z-30 F600');
+  const acks = lines.filter(line => line === 'ok').length;
+  sim.tick(1); sim.input('?');
+  assert.match(lines.at(-1), /^<Run\|MPos:0.000,0.000,-10.000\|WCO:0.000,0.000,0.000\|FS:600,0\|Ov:/);
+  assert.equal(lines.filter(line => line === 'ok').length, acks, 'G38.2 holds its ACK until the cycle ends');
+  sim.tick(5);
+  assert.deepEqual(lines.slice(-2), ['[PRB:0.000,0.000,-20.000:1]', 'ok']);
+  sim.input('?');
+  assert.match(lines.at(-1), /^<Idle\|MPos:0.000,0.000,-20.000\|WCO:0.000,0.000,0.000\|FS:0,0\|Pn:P\|Ov:100,100,100>$/);
+  command('$G');
+  assert.match(lines.at(-2), /^\[GC:G38.2 G54 /);
+  command('G10 L20 P0 Z10');
+  command('G91 G0 Z2'); sim.tick(1); sim.input('?');
+  assert.doesNotMatch(lines.at(-1), /Pn:/);
+  command('$#');
+  assert.ok(lines.includes('[G54:0.000,0.000,-30.000]'));
+  assert.ok(lines.includes('[PRB:0.000,0.000,-20.000:1]'));
+});
+
+test('a probe cycle waits for queued motion and probes sideways into the box', () => {
+  const { sim, command, lines } = machine();
+  command('$SIM/probe=10,60,0,40,-5');
+  command('G90 G1 Y20 Z-10 F600'); command('G38.2 X30 F600');
+  assert.equal(lines.filter(line => line === 'ok').length, 2);
+  sim.tick(5);
+  assert.deepEqual(sim.position.map(n => +n.toFixed(6)), [10, 20, -10]);
+  assert.deepEqual(lines.slice(-2), ['[PRB:10.000,20.000,-10.000:1]', 'ok']);
+});
+
+test('a missed G38.2 raises ALARM:5 and G38.3 reports the miss without alarm', () => {
+  const { sim, command, lines } = machine();
+  command('G38.2 Z-5 F600'); sim.tick(1);
+  assert.deepEqual(lines.slice(-4), ['[MSG:INFO: ALARM: Probe Fail Contact]', 'ALARM:5', '[PRB:0.000,0.000,0.000:0]', 'ok']);
+  assert.equal(sim.state, 'Alarm');
+  assert.equal(sim.position[2], -5);
+  command('G0 Z0');
+  assert.equal(lines.at(-1), 'error:9');
+  command('$X');
+  command('G38.3 Z-10 F600'); sim.tick(1);
+  assert.deepEqual(lines.slice(-2), ['[PRB:0.000,0.000,-10.000:0]', 'ok']);
+  assert.equal(sim.state, 'Idle');
+});
+
+test('probing from contact raises ALARM:4 and G38.4 stops when contact opens', () => {
+  const { sim, command, lines } = machine();
+  command('$SIM/probe=-10,10,-10,10,0');
+  for (const text of ['G38.2 Z-1 F600', 'G38.3 Z-1 F600']) {
+    command('$X'); command(text);
+    assert.deepEqual(lines.slice(-3), ['[MSG:INFO: ALARM: Probe Fail Initial]', 'ALARM:4', 'ok'], text);
+    assert.equal(sim.motion, null);
+  }
+  command('$X');
+  command('G38.4 Z5 F600'); sim.tick(1);
+  assert.deepEqual(lines.slice(-2), ['[PRB:0.000,0.000,0.000:1]', 'ok']);
+  assert.equal(sim.inputs(), '');
+  command('G38.5 Z5 F600');
+  assert.deepEqual(lines.slice(-3), ['[MSG:INFO: ALARM: Probe Fail Initial]', 'ALARM:4', 'ok']);
+  command('$X');
+  command('G38.2 Z-1 F600'); sim.tick(1);
+  assert.deepEqual(lines.slice(-2), ['[PRB:0.000,0.000,0.000:1]', 'ok']);
+  command('$SIM/probe=off');
+  command('$X'); command('G38.4 Z1 F600'); sim.tick(1);
+  assert.equal(lines.at(-2), 'ALARM:4');
+});
+
+test('the toolsetter reports Pn:T and stops G38.2 like the probe input', () => {
+  const { sim, command, lines } = machine();
+  command('$SIM/toolsetter=100,50,-10');
+  assert.equal(lines.at(-2), '[SIM/TOOLSETTER:100.000,50.000,-10.000,10.000]');
+  command('$SIM/probe=0,200,0,100,-15');
+  command('G53 G0 X104 Y46'); command('G38.2 Z-30 F600'); sim.tick(5);
+  assert.deepEqual(lines.slice(-2), ['[PRB:104.000,46.000,-10.000:1]', 'ok']);
+  sim.input('?');
+  assert.match(lines.at(-1), /\|FS:0,0\|Pn:T\|Ov:/);
+  command('G38.2 Z-30 F600');
+  assert.equal(lines.at(-2), 'ALARM:4', 'Touching the toolsetter counts as a triggered probe');
+  command('$X'); command('G91 G0 Z-5'); sim.tick(1); sim.input('?');
+  assert.match(lines.at(-1), /\|Pn:PT\|/);
+  command('$SIM/toolsetter');
+  assert.equal(lines.at(-2), '[SIM/TOOLSETTER:100.000,50.000,-10.000,10.000]');
+  for (const text of ['$SIM/toolsetter=1,2', '$SIM/probe=1,0,0,1,0', '$SIM/probe=a,b,c,d,e', '$SIM/spindle=1']) {
+    command(text);
+    assert.equal(lines.at(-1), 'error:3', text);
+  }
+});
+
+test('feed hold pauses a probe cycle and soft reset abandons it', () => {
+  const { sim, command, lines } = machine();
+  command('$SIM/probe=-10,10,-10,10,-20');
+  command('G38.2 Z-30 F600'); sim.tick(1);
+  sim.input('!'); sim.tick(10);
+  assert.equal(sim.position[2], -10);
+  sim.input('~'); sim.tick(2);
+  assert.deepEqual(lines.slice(-2), ['[PRB:0.000,0.000,-20.000:1]', 'ok']);
+  command('G91 G0 Z5'); sim.tick(1);
+  command('G38.2 Z-30 F600'); sim.tick(0.1);
+  sim.input(Buffer.from([0x18])); sim.tick(10);
+  assert.equal(sim.commandState, 'ready');
+  assert.equal(sim.motion, null);
+  assert.ok(sim.position[2] > -20);
+});
+
+test('G10 L20 P0-P6, G54-G59 selection, G43.1 and G49 shape the work frame', () => {
+  const { sim, command, lines } = machine();
+  command('G0 X10 Y20 Z-5'); sim.tick(1);
+  command('G10 L20 P2 X1 Y2 Z3');
+  assert.deepEqual(sim.offset, [0, 0, 0], 'P2 writes G55 without selecting it');
+  command('G55');
+  assert.deepEqual(sim.offset, [9, 18, -8]);
+  command('G10 L20 P0 X0');
+  assert.equal(sim.offsets[1][0], 10, 'P0 writes the active system');
+  command('G43.1 Z2.5');
+  assert.deepEqual(sim.offset, [10, 18, -5.5]);
+  command('G10 L20 P0 Z0');
+  assert.deepEqual(sim.offsets[1], [10, 18, -7.5], 'L20 accounts for the tool length offset');
+  assert.deepEqual(sim.offset, [10, 18, -5]);
+  command('$#');
+  assert.ok(lines.includes('[G55:10.000,18.000,-7.500]'));
+  assert.ok(lines.includes('[TLO:2.500]'));
+  command('$G');
+  assert.match(lines.at(-2), /^\[GC:G0 G55 /);
+  sim.input('?');
+  assert.match(lines.at(-1), /\|WCO:10.000,18.000,-5.000\|/);
+  command('G90 G0 Z0'); sim.tick(1);
+  assert.equal(sim.position[2], -5);
+  command('G49');
+  assert.deepEqual(sim.offset, [10, 18, -7.5]);
+  command('G53 G0 Z0'); sim.tick(1);
+  assert.equal(sim.position[2], 0);
+  for (const [text, code] of [['G10 L20 P7 X0', 29], ['G10 L20 X0', 28], ['G10 L2 P1 X0', 20], ['G43.1 X1', 37], ['G43.1', 37], ['G53 G38.2 Z-1 F100', 30], ['G54 G55', 21], ['G91 G38.2 Z0 F100', 33]]) {
+    command(text);
+    assert.equal(lines.at(-1), `error:${code}`, text);
+  }
+  assert.equal(sim.distance, 'G90', 'A rejected line leaves modal state unchanged');
+  sim.input(Buffer.from([0x18]));
+  assert.equal(sim.wcs, 0);
+  assert.equal(sim.toolLengthOffset, 0);
+  assert.deepEqual(sim.offsets[1], [10, 18, -7.5], 'Work offsets persist across soft reset');
 });
 
 test('CNCjs serial binding enumerates only simulator and rejects physical ports', async () => {
