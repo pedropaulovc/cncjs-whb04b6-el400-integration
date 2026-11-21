@@ -924,7 +924,8 @@ async function exerciseProbe({ page, socket, token, browserErrors, state }) {
   await expect.poll(() => state().status.pinState).toBe('T');
   await expect(touch).toHaveAttribute('data-touch', 'toolsetter');
   await expect(start).toBeEnabled();
-  await widget.getByRole('button', { name: 'Cancel', exact: true }).click();
+  // Tool length mode has its own Cancel (#tl-cancel); close the run panel's.
+  await widget.getByRole('dialog', { name: 'Probe' }).getByRole('button', { name: 'Cancel', exact: true }).click();
   socket.emit('command', 'SIMULATOR', 'gcode', 'G53 G0 Z0');
   await idleAtZ(0);
   await simulator('$SIM/toolsetter=off', '[SIM/TOOLSETTER:OFF');
