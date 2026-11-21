@@ -564,6 +564,62 @@ test('G10 L20 P0-P6, G54-G59 selection, G43.1 and G49 shape the work frame', () 
   assert.deepEqual(sim.offsets[1], [10, 18, -7.5], 'Work offsets persist across soft reset');
 });
 
+test('G38.4 at a shallow exit angle stops outside the contact tolerance', () => {
+  const { sim, command, lines } = machine();
+  command('$SIM/probe=-500,500,-500,500,0');
+  command('G53 G0 Z-0.5'); sim.tick(1);
+  command('G91 G38.4 X100 Z1 F600'); sim.tick(20);
+  assert.deepEqual(lines.slice(-2), ['[PRB:50.000,0.000,0.000:1]', 'ok']);
+  assert.equal(sim.inputs(), '', 'A reported release must leave the input open');
+  command('G38.2 Z-1 F600'); sim.tick(1);
+  assert.deepEqual(lines.slice(-2), ['[PRB:50.000,0.000,0.000:1]', 'ok'], 'The next probe must not raise ALARM:4');
+});
+
+test('G38.4 keeps moving while an adjacent toolsetter is still closed', () => {
+  const { sim, command, lines } = machine();
+  command('$SIM/probe=-10,10,-10,10,0');
+  command('$SIM/toolsetter=15,0,0,10');
+  command('G0 Z-1'); sim.tick(1);
+  command('G38.4 X30 F600'); sim.tick(5);
+  assert.deepEqual(lines.slice(-2), ['[PRB:20.000,0.000,-1.000:1]', 'ok']);
+  assert.equal(sim.inputs(), '');
+});
+
+test('ALARM:4 marks the stored probe result as failed', () => {
+  const { sim, command, lines } = machine();
+  command('$SIM/probe=-10,10,-10,10,-5');
+  command('G38.2 Z-10 F600'); sim.tick(1);
+  assert.deepEqual(lines.slice(-2), ['[PRB:0.000,0.000,-5.000:1]', 'ok']);
+  command('G38.2 Z-10 F600');
+  assert.equal(lines.at(-2), 'ALARM:4');
+  command('$X'); command('$#');
+  assert.ok(lines.includes('[PRB:0.000,0.000,-5.000:0]'));
+});
+
+test('$SIM inputs reject empty or non-decimal fields', () => {
+  const { sim, command, lines } = machine();
+  for (const text of ['$SIM/toolsetter=1,2,', '$SIM/probe=,,,,', '$SIM/probe=0,1,0,1,0x5', '$SIM/toolsetter=1,2,3,', '$SIM/toolsetter=1,2,1e3']) {
+    command(text);
+    assert.equal(lines.at(-1), 'error:3', text);
+  }
+  assert.deepEqual(sim.inputBoxes, { PROBE: null, TOOLSETTER: null });
+  command('$SIM/toolsetter=-1.5,+2,.5');
+  assert.equal(lines.at(-2), '[SIM/TOOLSETTER:-1.500,2.000,0.500,10.000]');
+});
+
+test('two axis-word commands in one block raise error:24 without side effects', () => {
+  const { sim, command, lines } = machine();
+  for (const text of ['G10 L20 P1 G43.1 Z5', 'G38.2 G10 L20 P1 Z0', 'G0 G43.1 Z5', 'G1 G49 X1 F100', 'G10 L20 P1 G49 X1']) {
+    command(text);
+    assert.equal(lines.at(-1), 'error:24', text);
+  }
+  sim.tick(5);
+  assert.deepEqual(sim.position, [0, 0, 0]);
+  assert.deepEqual(sim.offsets[0], [0, 0, 0]);
+  assert.equal(sim.toolLengthOffset, 0);
+  assert.equal(sim.mode, 'G0');
+});
+
 test('CNCjs serial binding enumerates only simulator and rejects physical ports', async () => {
   const { install } = require('../simulator/register.cjs');
   const { SerialPort } = install();
