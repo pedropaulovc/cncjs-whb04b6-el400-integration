@@ -8,7 +8,14 @@ import { createServer } from 'node:net';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
-import { chromium, expect } from '@playwright/test';
+import { chromium, expect as playwrightExpect } from '@playwright/test';
+
+// expect.poll backs off to 100, 250, 500 and then 1000 ms between checks, so a
+// condition met just after a check waits up to a second for the next one.
+// CNCjs broadcasts status every 250 ms; check every 50 ms instead.
+const expect = Object.assign((...args) => playwrightExpect(...args), {
+  poll: (callback, options) => playwrightExpect.poll(callback, { intervals: [50], ...options }),
+});
 
 // Use the client shipped with the pinned CNCjs server so protocol versions agree.
 const require = createRequire(import.meta.url);
@@ -545,8 +552,10 @@ async function withRealWidgets(t, scenario) {
   controls.stop();
   await expect.poll(() => pendant.stopPhase).toBe('idle');
   // Observing G20 establishes that GRBL processed commands after the dwell.
+  // Ask for $G with it: the soft resets above can discard CNCjs's own in-flight
+  // $G, and CNCjs then waits up to 10 s before polling parser state again.
   const mdiDrained = event(socket, 'controller:state', (_, state) => state.parserstate?.modal?.units === 'G20');
-  pendant.command('gcode', 'G20');
+  pendant.command('gcode', ['G20', '$G']);
   await mdiDrained;
   for (let report = 0; report < 2; report++) {
     const mdiStatus = event(socket, 'serialport:read', line => line.startsWith('<'), 2000);
