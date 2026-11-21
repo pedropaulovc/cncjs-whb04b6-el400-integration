@@ -12,6 +12,7 @@ Components:
 - [EL400 DRO](https://github.com/pedropaulovc/el400)
 - [Conversational programming widget](https://github.com/pedropaulovc/cncjs-conversational)
 - [dechatter chatter-free cut finder](https://github.com/pedropaulovc/dechatter)
+- [Probe widget](https://github.com/pedropaulovc/cncjs-probe)
 
 ## Install
 
@@ -76,6 +77,7 @@ npm start
    | EL400 DRO | `/el400/?source=cncjs` |
    | Conversational | `/conversational/` |
    | dechatter | `/dechatter/` |
+   | Probe | `/probe/` |
 
    The conversational widget generates G-code for facing, side facing, squaring
    up stock, pockets and bolt circles. With a port open, its **Load in CNCjs**
@@ -89,6 +91,14 @@ npm start
    the computer's microphone, so the browser asks for microphone access. A
    CNCjs job started during a round stops it. The widget takes a few seconds
    to start: it runs Python in the browser tab.
+
+   The probe widget brings gSender's Probe tool to CNCjs: touch plate zeroing
+   (Standard Block, AutoZero, Z Probe, 3D Probe and BitZero) and tool length
+   probing, sent as one CNCjs G-code command. With **Connection test** on, the
+   routine starts only after the widget sees a touch. Unlike gSender, a FluidNC
+   toolsetter input (`Pn:T`) counts as a touch, just like the probe input
+   (`Pn:P`). In simulation, give the probe something to touch first; see
+   [Simulated probing](#simulated-probing).
 
    EL400's **Enter fullscreen** control below the readout requests browser
    fullscreen on a click; **Exit fullscreen** or Esc leaves it. This differs
@@ -142,11 +152,36 @@ It uses CNCjs's actual serial transport interface and GRBL parser with an in-pro
 mock binding, so no virtual COM driver, `socat`, or administrator access is needed.
 
 The simulator supports XYZ linear moves, standalone `G4 Pseconds` dwells, timed jogging, status queries, hold/resume,
-jog cancel, reset, feed/rapid/spindle overrides, spindle and coolant state, homing to zero, G20/G21, G90/G91, and G54 work offsets through
-`G10 L20 P1`. It does not model cutting, acceleration, limits, alarms, arcs, probing,
+jog cancel, reset, feed/rapid/spindle overrides, spindle and coolant state, homing to zero, G20/G21, G90/G91,
+G54–G59 work offsets through `G10 L20 P0`–`P6`, `G43.1`/`G49` tool length offsets, `G53` machine moves and
+`G38.2`–`G38.5` probing. It does not model cutting, acceleration, limits, arcs,
 or firmware configuration writes. Unsupported G-code returns an
 error. Positions reset on reconnection or restart. Use it to check the controls
 and readout, not to validate a machining program.
+
+### Simulated probing
+
+The simulator has two virtual inputs, both off at startup. Set them from the
+CNCjs console; values are millimetres in machine coordinates:
+
+| Command | Effect |
+| --- | --- |
+| `$SIM/probe=xmin,xmax,ymin,ymax,ztop` | Probe input (`Pn:P`): a workpiece or touch plate whose top is at `ztop`, reaching down without limit |
+| `$SIM/toolsetter=x,y,ztop[,size]` | Toolsetter input (`Pn:T`): a square pad, `size` mm wide (default 10), centred on `x,y`, with its top at `ztop` |
+| `$SIM/probe=off`, `$SIM/toolsetter=off` | Remove the input |
+| `$SIM/probe`, `$SIM/toolsetter` | Show the current setting |
+
+The tool tip touches an input when it is inside or on its box; status reports
+then add FluidNC 4.1.1's `|Pn:P`, `|Pn:T` or `|Pn:PT`. Ordinary moves pass
+through the boxes. `G38.2`/`G38.3` stop when either input is touched, and
+`G38.4`/`G38.5` when contact opens, then reply `[PRB:x,y,z:1]` and `ok`. With no
+contact, `G38.2`/`G38.4` raise `ALARM:5` (Probe Fail Contact) and `G38.3`/`G38.5`
+reply `[PRB:...:0]`. Starting any probe cycle already in the stopping state
+raises `ALARM:4` (Probe Fail Initial). Unlock alarms with `$X`.
+
+For example, with the tool at machine Z 0, a 15 mm puck on a workpiece whose top
+is at machine Z −25 is `$SIM/probe=-200,200,-200,200,-10`. A Z Probe zeroing with
+**Puck thickness** 15 then leaves work Z0 on the workpiece top.
 
 ## Pendant controls
 
@@ -301,7 +336,7 @@ browser permissions, which this launcher does not configure.
 - **Port already in use:** stop the other server or supply `--port`.
 
 Runtime files live under `.runtime/`: `install.json` records widget paths and
-the pendant, EL400, conversational and dechatter npm versions. `cncjs-simulator.json` and
+the pendant, EL400, conversational, dechatter and probe npm versions. `cncjs-simulator.json` and
 `cncjs-machine.json` hold separate server settings. These files can contain
 credentials and are excluded from Git.
 To rebuild from scratch, stop the server, save any wanted runtime settings and

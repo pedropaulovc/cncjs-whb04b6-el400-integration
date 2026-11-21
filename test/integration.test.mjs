@@ -92,7 +92,7 @@ async function withRealWidgets(t, scenario) {
   }
   assert.ok(response?.ok, `CNCjs did not start: ${output}`);
   for (const path of ['/el400/', '/whb04b/widget/index.html', '/whb04b/whb04b-webhid.js', '/conversational/',
-    '/dechatter/', '/dechatter/widget.js', '/dechatter/pyodide/pyodide.js', '/dechatter/pyodide/pyodide.asm.wasm']) {
+    '/dechatter/', '/dechatter/widget.js', '/dechatter/pyodide/pyodide.js', '/dechatter/pyodide/pyodide.asm.wasm', '/probe/']) {
     const asset = await fetch(base + path);
     assert.equal(asset.status, 200, path);
   }
@@ -275,6 +275,10 @@ async function withRealWidgets(t, scenario) {
   await expect(droFrame.getByTestId('axis-value-x')).toHaveText('0.0000', { timeout: 10000 });
   if (scenario === 'conversational') {
     await exerciseConversationalLoad({ page, socket, token, browserErrors });
+    return;
+  }
+  if (scenario === 'probe') {
+    await exerciseProbe({ page, socket, token, browserErrors, state: () => latestState });
     return;
   }
   if (scenario === 'clearance') {
@@ -826,6 +830,106 @@ test('real CNCjs shared Tool Change Position Z and pending-read Stop safety', { 
 test('real CNCjs loads a conversational program from its sandboxed widget', { timeout: 90000 }, async t => {
   await withRealWidgets(t, 'conversational');
 });
+
+// Setup requires cncjs-probe, but until it is published and pinned an older
+// checkout can run this file without it; skip rather than fail there.
+const probeWidget = (() => {
+  try { return require.resolve('cncjs-probe/package.json'); } catch { return null; }
+})();
+
+test('real CNCjs probes Z with the probe widget and counts the toolsetter as a touch', {
+  timeout: 120000,
+  skip: probeWidget ? false : 'cncjs-probe is not installed: publish it, pin it in package.json and rerun setup',
+}, async t => {
+  await withRealWidgets(t, 'probe');
+});
+
+async function exerciseProbe({ page, socket, token, browserErrors, state }) {
+  // The puck rests on a workpiece whose top is machine Z -25, so the probe
+  // touches the top of the puck at -25 + 15 = -10, and gSender's routine
+  // writes G54 Z so that the workpiece top becomes work Z0.
+  const workpieceTop = -25;
+  const puckThickness = 15;
+  const simulator = async (command, reply) => {
+    const answered = event(socket, 'serialport:read', line => line.startsWith(reply));
+    socket.emit('command', 'SIMULATOR', 'gcode', command);
+    await answered;
+  };
+  const position = frame => ['x', 'y', 'z'].map(axis => Number(state().status[frame][axis]));
+  const idleAtZ = async z => {
+    await expect.poll(() => position('mpos')[2]).toBe(z);
+    await expect.poll(() => state().status.activeState).toBe('Idle');
+  };
+  await simulator(`$SIM/probe=-200,200,-200,200,${workpieceTop + puckThickness}`, '[SIM/PROBE:');
+  await simulator('$SIM/toolsetter=off', '[SIM/TOOLSETTER:OFF');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G21 G53 G0 Z0');
+  await idleAtZ(0);
+
+  await page.evaluate(({ token }) => {
+    window.addEventListener('message', (e) => {
+      if (e.data?.token !== token || e.data.action?.type !== 'connect') return;
+      e.source.postMessage({ token, action: { type: 'change', payload: { port: 'SIMULATOR', controller: 'Grbl' } } }, '*');
+    });
+    const frame = document.createElement('iframe');
+    frame.name = 'probe';
+    frame.sandbox = 'allow-forms allow-modals allow-popups allow-same-origin allow-scripts';
+    frame.style.cssText = 'display:block;width:340px;height:1200px;border:0';
+    frame.src = `/probe/?token=${encodeURIComponent(token)}`;
+    document.body.append(frame);
+  }, { token });
+  const widget = page.frameLocator('iframe[name="probe"]');
+  const touch = widget.getByTestId('touch-status');
+  const start = widget.getByRole('button', { name: 'Start probe', exact: true });
+
+  await widget.getByLabel('Touch plate').selectOption({ label: 'Z Probe' });
+  await widget.getByRole('button', { name: 'Z', exact: true }).click();
+  await expect(widget.getByRole('button', { name: 'Z', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await widget.getByText('Settings', { exact: true }).click();
+  await widget.getByLabel('Puck thickness').fill(String(puckThickness));
+  await expect(widget.getByLabel('Connection test')).toBeChecked();
+  await widget.getByRole('button', { name: 'Probe', exact: true }).click({ timeout: 15000 });
+  await expect(start).toBeDisabled();
+
+  // The connection test: touch the puck (Pn:P), then lift off before starting.
+  socket.emit('command', 'SIMULATOR', 'gcode', `G53 G0 Z${workpieceTop + puckThickness - 1}`);
+  await expect(touch).toHaveAttribute('data-touch', 'probe', { timeout: 10000 });
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G53 G0 Z0');
+  await idleAtZ(0);
+  await expect(touch).toHaveAttribute('data-touch', 'none');
+  await expect(start).toBeEnabled();
+  const prbLine = event(socket, 'serialport:read', line => /^\[PRB:.*:1\]$/.test(line), 60000);
+  await start.click();
+  const [prb] = await prbLine;
+  assert.equal(Number(prb.slice(1, -1).split(':')[1].split(',')[2]), workpieceTop + puckThickness);
+  // G10 L20 P0 Z[thickness] at the puck top: G54 Z = contact Z - thickness.
+  await expect.poll(() => position('mpos')[2] - position('wpos')[2], { timeout: 60000 })
+    .toBeCloseTo(workpieceTop, 3);
+  await expect.poll(() => state().status.activeState, { timeout: 60000 }).toBe('Idle');
+  assert.equal(state().parserstate.modal.wcs, 'G54');
+
+  // A FluidNC toolsetter reports Pn:T; with the connection test on it must
+  // count as a touch. A reloaded widget starts without a latched touch.
+  await simulator('$SIM/probe=off', '[SIM/PROBE:OFF');
+  const [x, y] = position('mpos');
+  await simulator(`$SIM/toolsetter=${x},${y},-40`, '[SIM/TOOLSETTER:');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G53 G0 Z0');
+  await idleAtZ(0);
+  const frame = page.frame({ name: 'probe' });
+  await frame.goto(frame.url(), { waitUntil: 'load' });
+  await widget.getByLabel('Touch plate').selectOption({ label: 'Z Probe' });
+  await widget.getByRole('button', { name: 'Probe', exact: true }).click({ timeout: 15000 });
+  await expect(start).toBeDisabled();
+  await expect(touch).toHaveAttribute('data-touch', 'none');
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G53 G0 Z-41');
+  await expect.poll(() => state().status.pinState).toBe('T');
+  await expect(touch).toHaveAttribute('data-touch', 'toolsetter');
+  await expect(start).toBeEnabled();
+  await widget.getByRole('button', { name: 'Cancel', exact: true }).click();
+  socket.emit('command', 'SIMULATOR', 'gcode', 'G53 G0 Z0');
+  await idleAtZ(0);
+  await simulator('$SIM/toolsetter=off', '[SIM/TOOLSETTER:OFF');
+  assert.deepEqual(browserErrors, [], 'The probe widget must run without browser exceptions');
+}
 
 async function exerciseSharedClearance({ page, pendantFrame, socket, writes, base, token,
   browserErrors, state }) {

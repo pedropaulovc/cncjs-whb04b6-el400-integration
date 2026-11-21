@@ -6,7 +6,9 @@ npx playwright install chromium
 npm run test:integration
 ```
 
-Unit tests exercise the GRBL protocol and simulated serial isolation. The
+Unit tests exercise the GRBL protocol, simulated probing (`G38.2`–`G38.5`
+against the virtual probe and toolsetter inputs, work offsets and tool length
+offsets) and simulated serial isolation. The
 integration test starts the real CNCjs server, checks widget assets, opens the
 simulator, exercises the pendant's session after G20, and checks machine/work
 coordinates through Socket.IO. It also boots both widgets in Chromium and checks
@@ -40,11 +42,18 @@ to use Edge locally instead of Playwright's bundled Chromium.
 CI runs setup and these tests on Windows and Linux. Hardware WebHID permission
 and physical motion still require the operator checks in the README.
 
-Publish pendant, EL400, conversational or dechatter widget changes as an npm
+The probe scenario embeds `/probe/`, places the simulated probe surface, runs a
+Z-only Z Probe zeroing and checks the G54 Z offset (contact Z minus puck
+thickness). It then touches only the simulated toolsetter and checks that `Pn:T`
+lights the widget's touch indicator and enables **Start probe** with
+**Connection test** on. It is skipped when `cncjs-probe` is not installed.
+
+Publish pendant, EL400, conversational, dechatter or probe widget changes as an npm
 release from the respective repository before updating this integration. Install
 the chosen release with `npm install --save-exact cncjs-pendant-whb04b-6@<version>`,
 `npm install --save-exact el400@<version>`,
-`npm install --save-exact cncjs-conversational@<version>` or
-`npm install --save-exact dechatter@<version>`, commit both package files, then rerun
+`npm install --save-exact cncjs-conversational@<version>`,
+`npm install --save-exact dechatter@<version>` or
+`npm install --save-exact cncjs-probe@<version>`, commit both package files, then rerun
 setup and the tests above. Setup serves each installed package's `web` directory;
 it does not read widget code from sibling checkouts.
