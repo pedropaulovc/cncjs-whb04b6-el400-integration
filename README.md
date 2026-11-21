@@ -103,6 +103,13 @@ npm start
 4. Plug in the pendant receiver and click **Connect pendant** inside its widget.
    Choose the WHB04B-6 device in the browser prompt. This permission needs an
    operator click; it cannot be granted by the setup script.
+
+   WebHID drops the pendant whenever the browser window loses focus. On Windows,
+   use the sidecar instead: download `Whb04bSidecar.exe` from the pendant's
+   [v3.3.0 release](https://github.com/pedropaulovc/cncjs-pendant-whb04b-6/releases/tag/v3.3.0),
+   run it (it lives in the tray), then set **Pendant settings → Pendant link** to
+   **Sidecar**. The pendant then keeps working while CNCjs is unfocused or
+   minimized. Its `--simulate` flag gives a simulated pendant for practice.
 5. Select X on the pendant, choose a small step, and turn the wheel. It starts in **Step** mode. CNCjs and
    the EL400 should follow the simulated position. Without a pendant, use
    CNCjs's jog buttons or enter `$J=G91 G21 X5 F600` in its console.
