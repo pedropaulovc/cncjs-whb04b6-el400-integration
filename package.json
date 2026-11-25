@@ -27,7 +27,7 @@
     "cncjs-conversational": "0.3.0",
     "cncjs-pendant-whb04b-6": "3.3.0",
     "cncjs-probe": "0.1.2",
-    "dechatter": "0.7.0",
+    "dechatter": "0.8.0",
     "el400": "0.3.1"
   },
   "private": true,
