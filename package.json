@@ -8,7 +8,8 @@
     "test:integration": "node --test test/integration.test.mjs",
     "setup": "node scripts/setup.mjs",
     "machine": "node scripts/start.mjs --mode machine",
-    "simulate": "node scripts/start.mjs --mode simulator"
+    "simulate": "node scripts/start.mjs --mode simulator",
+    "cnc": "node scripts/cnc.mjs"
   },
   "repository": {
     "type": "git",
